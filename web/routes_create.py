@@ -1009,7 +1009,7 @@ def do_save(body: SaveIn):
         checks["numbers_check"] = nums
     record = {
         "ts": datetime.datetime.now().isoformat(timespec="seconds"),
-        "tool": "web-create v0.11.2", "session_id": body.session_id,
+        "tool": "web-create v0.11.3", "session_id": body.session_id,
         "project": body.project, "pack": body.pack,
         "chapter_no": body.chapter_no, "title": title,
         "keywords": body.keywords,
@@ -1329,6 +1329,7 @@ def longform_g0(project: str, chapter_no: int):
     return {"longform": True, "arc": arc, "probe": probe,
             "arc_confirmed": bool(arc and _arc_confirmed(otext, arc)),
             "brief": brief, "budget": _budget_of(d),
+            "blueprint_changed": _blueprint_changed(d),
             "numbers_section": assemble_mod.numbers_section(d, chapter_no)}
 
 
@@ -1365,6 +1366,7 @@ def longform_arc_confirm(body: ArcConfirmIn):
     line = f"{chr(10)}- 图纸确认：{stamp}（弧简报卡已过目，G-0.5）"
     outline.write_text(text[:eol] + line + text[eol:] if eol >= 0 else text + line,
                        encoding="utf-8", newline=chr(10))
+    _blueprint_baseline(d, refresh=True)  # 图纸确认=基线时刻（§5.3）
     return {"ok": True, "confirmed": stamp,
             "cli": "网页确认 = outline.md 弧块追加「- 图纸确认：日期」"}
 
@@ -1528,6 +1530,302 @@ def longform_budget_set(body: BudgetIn):
             "cli": "网页改预算 = 编辑 style/budget.json（rev+1）"}
 
 
+# ---- 弧末治理（v0.11.3 阶段 D）：漂移网 + 交接汇总 + 图纸变更检测 ----
+# 来源：灾厄前线工单一（G3 清单模式：只验硬数字逐条+伏笔动作+节拍落位）、
+# 两次实战交接汇总、图纸门 §5.3 防线4（hash 检测外部改动→受影响回扫）。
+
+def _file_sha(p: Path) -> str:
+    import hashlib
+    return hashlib.sha256(p.read_bytes()).hexdigest()[:16] if p.is_file() else ""
+
+
+def _blueprint_files(d: Path) -> dict:
+    """图纸文件集：outline.md + bible 全部 md/json（人物卡/世界观/数字表在列）。"""
+    out = {}
+    o = d / "outline.md"
+    if o.is_file():
+        out["outline.md"] = _file_sha(o)
+    bible = d / "bible"
+    if bible.is_dir():
+        for f in sorted(bible.iterdir()):
+            if f.suffix in (".md", ".json"):
+                out[f"bible/{f.name}"] = _file_sha(f)
+    return out
+
+
+def _blueprint_baseline(d: Path, refresh: bool = False) -> dict:
+    """图纸基线（style/blueprint.json）。首读自动建（缓存性质）；refresh=True
+    在人工确认点（开弧/图纸确认/再确认）重置。"""
+    p = d / "style" / "blueprint.json"
+    if not refresh and p.is_file():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+    base = {"files": _blueprint_files(d),
+            "ts": datetime.datetime.now().isoformat(timespec="seconds")}
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(base, ensure_ascii=False, indent=2) + "\n",
+                 encoding="utf-8", newline="\n")
+    return base
+
+
+def _blueprint_changed(d: Path) -> list[str]:
+    base = _blueprint_baseline(d)
+    cur = _blueprint_files(d)
+    return [k for k in sorted(set(base["files"]) | set(cur))
+            if base["files"].get(k) != cur.get(k)]
+
+
+class ProjectIn(BaseModel):
+    project: str
+
+
+@router.post("/longform/blueprint_confirm")
+def longform_blueprint_confirm(body: ProjectIn):
+    """图纸再确认（§5.3 防线4 出口）：人核对变更（含回扫结果）后重置基线。"""
+    cfg = appstate.load_config()
+    d = _project_dir(cfg, body.project)
+    if not _is_longform(d):
+        raise HTTPException(400, "该项目不是长篇模式")
+    base = _blueprint_baseline(d, refresh=True)
+    return {"ok": True, "files": len(base["files"]),
+            "ts": base["ts"],
+            "cli": "网页再确认 = 重写 style/blueprint.json 基线"}
+
+
+@router.post("/longform/retroscan")
+def longform_retroscan(body: ProjectIn):
+    """账本回扫（retroscan，§12.3②）：numbers_check --all 全量对照历史章——
+    新账落定后揪"后立口径与前文冲突"的旧错。advisory 报不拦。"""
+    cfg = appstate.load_config()
+    d = _project_dir(cfg, body.project)
+    if not _is_longform(d):
+        raise HTTPException(400, "该项目不是长篇模式")
+    r = _run_gate("numbers_check.py",
+                  [str(d), "--ledger", str(d / "bible" / "硬数字表.md"),
+                   "--all"])
+    return {"exit_code": r["exit_code"], "report": r["report"]}
+
+
+@router.get("/longform/arcanet")
+def longform_arcanet(project: str, arc_no: int):
+    """弧末漂移网指令包（D/G3 清单模式）：复制到**独立会话/子代理**执行——
+    只验硬数字表逐条 + 伏笔动作 + 弧节拍落位，不做五维全量（省百万级 tokens）。
+    数字类错误须标来源（表外自造/表内执行错/表本身错——工单三分诊断）。"""
+    cfg = appstate.load_config()
+    d = _project_dir(cfg, project)
+    if not _is_longform(d):
+        raise HTTPException(400, "该项目不是长篇模式")
+    outline = d / "outline.md"
+    arcs = _parse_arcs(outline.read_text(encoding="utf-8")
+                       if outline.is_file() else "")
+    arc = next((a for a in arcs if a["no"] == arc_no), None)
+    if not arc:
+        raise HTTPException(404, f"弧{arc_no} 不存在")
+    nums = assemble_mod.numbers_section(d, arc["end"])
+    ff: list[str] = []
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
+        from store import Store  # noqa: E402
+        store = Store(d)
+        try:
+            recap = store.recap(1)
+        finally:
+            store.close()
+        ff = [f"{r['title']}（第{r['planted_chapter']}章埋）"
+              for r in (recap.get("open_foreshadow") or [])]
+    except Exception:  # noqa: BLE001
+        pass
+    NL = chr(10)
+    lines = [
+        f"# 弧{arc['no']}《{arc['title']}》漂移网复检（清单模式·独立审查）",
+        "",
+        f"你是独立审查员，未参与本弧写作。审查对象：第 {arc['start']}-"
+        f"{arc['end']} 章正文（manuscript/）。只做以下三类清单核对，"
+        "不做全量五维审查：",
+        "",
+        "## 一、硬数字表逐条对照（数字唯一口径，只准引用）",
+        "对下表每条口径，在对应章节找出正文落点；找不出/写错即 FAIL。",
+    ]
+    if nums:
+        lines += ["```", nums, "```",
+                  "数字类错误标注来源（三分诊断）：①表外自造（写手造了表外数字）/"
+                  "②表内执行错（表对写错）/③表本身错（回填笔误）。"]
+    else:
+        lines.append("（本弧硬数字表为空——正文出现关键数字时逐条列出待回填）")
+    lines += ["", "## 二、伏笔动作核对（每章应有动作或明确回收）"]
+    lines += [f"- {x}" for x in ff] or ["- （账本无未回收伏笔）"]
+    lines += [
+        "",
+        "## 三、弧节拍落位",
+        f"- 原作锚点：{arc['anchors']}",
+        f"- 张力设计：{arc['tension']}",
+        f"- 勾稽点：{arc['hooks']}",
+        "",
+        "## 输出格式",
+        "每条：PASS / FAIL + 章节定位 + 原文证据（≤50 字引用）。",
+        "末尾给三行：必修项数 / 建议项数 / 结论（通过 / 修复后复检）。",
+        "",
+        "## 纪律",
+        "- 只审不改；发现矛盾**停写上报**，禁止圆稿；",
+        "- 你与写作不在同一会话——不许参考写作过程，只看文本与以上清单。",
+    ]
+    return {"arc": arc, "prompt": NL.join(lines),
+            "chapters": [arc["start"], arc["end"]]}
+
+
+class ArcnetArchiveIn(BaseModel):
+    project: str
+    arc_no: int
+    report: str
+
+
+@router.post("/longform/arcanet/archive")
+def arcanet_archive(body: ArcnetArchiveIn):
+    """漂移网结果归档：整合/一致性报告/弧N-漂移网-*.md（永不覆盖，撞名加序号）。"""
+    if not (body.report or "").strip():
+        raise HTTPException(400, "报告为空，拒绝归档")
+    cfg = appstate.load_config()
+    d = _project_dir(cfg, body.project)
+    if not _is_longform(d):
+        raise HTTPException(400, "该项目不是长篇模式")
+    out_dir = d / "整合" / "一致性报告"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    f, k = out_dir / f"弧{body.arc_no}-漂移网-{stamp}.md", 2
+    while f.exists():
+        f = out_dir / f"弧{body.arc_no}-漂移网-{stamp}-{k}.md"
+        k += 1
+    head = (f"<!-- 弧{body.arc_no} 漂移网复检归档 {stamp}｜清单模式 "
+            f"numbers 纪律 v0.11.3 -->" + chr(10))
+    f.write_text(head + body.report.strip() + chr(10),
+                 encoding="utf-8", newline=chr(10))
+    return {"ok": True, "file": str(f.relative_to(d)),
+            "cli": "网页归档 = 报告存 整合/一致性报告/弧N-漂移网-*.md"}
+
+
+def _arcnet_archived(d: Path, arc_no: int) -> bool:
+    rep = d / "整合" / "一致性报告"
+    return rep.is_dir() and any(rep.glob(f"弧{arc_no}-漂移网-*.md"))
+
+
+@router.get("/longform/handover")
+def longform_handover(project: str):
+    """一键交接汇总草稿（D）：进度/成本/伏笔/断点全从文件与账本现算——
+    压缩或换会话时复制即用。宪法来源：灾厄前线两次实战交接汇总。"""
+    cfg = appstate.load_config()
+    d = _project_dir(cfg, project)
+    if not _is_longform(d):
+        raise HTTPException(400, "该项目不是长篇模式")
+    outline = d / "outline.md"
+    arcs = _parse_arcs(outline.read_text(encoding="utf-8")
+                       if outline.is_file() else "")
+    ms, max_ch, words = d / "manuscript", 0, 0
+    if ms.is_dir():
+        for f in ms.glob("*.md"):
+            if m := re.match(r"(\d+)", f.stem):
+                max_ch = max(max_ch, int(m.group(1)))
+            try:
+                words += len(splib.read_text(f)[0])
+            except OSError:
+                pass
+    cost = d / "style" / "cost.jsonl"
+    total_tok, rows = 0, 0
+    if cost.is_file():
+        for line in cost.read_text(encoding="utf-8").splitlines():
+            if "web-create" not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            rows += 1
+            total_tok += int(row.get("session_tokens")
+                             or row.get("tokens") or 0)
+    digest, hook = "", ""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
+        from store import Store  # noqa: E402
+        store = Store(d)
+        try:
+            recap = store.recap(1)
+        finally:
+            store.close()
+        recent = recap.get("recent") or []
+        if recent:
+            latest = max(recent, key=lambda r: int(r.get("chapter") or 0))
+            digest = f"第{latest['chapter']}章：{latest['digest']}"
+        ff = recap.get("open_foreshadow") or []
+    except Exception:  # noqa: BLE001
+        ff = []
+    hook = _prev_ending_hook(d, max_ch + 1) if max_ch else ""
+    NL = chr(10)
+    lines = [
+        f"# 交接汇总（草稿·自动生成 {datetime.date.today().isoformat()}）",
+        "",
+        "## 一、进度",
+        f"- 现役：第 {max_ch} 章｜{words} 字｜交付记录 {rows} 条",
+        "- 弧状态：" + ("；".join(
+            f"弧{a['no']}《{a['title']}》（{a['start']}-{a['end']}章，"
+            f"{'图纸已确认' if _arc_confirmed(outline.read_text(encoding='utf-8') if outline.is_file() else '', a) else '图纸未确认'}"
+            f"{'，漂移网已归档' if _arcnet_archived(d, a['no']) else '，漂移网待跑'}）"
+            for a in arcs) or "（未开弧）"),
+        "",
+        "## 二、成本（web-create 交付口径）",
+        f"- 累计 {total_tok} tokens（看板页有逐弧/逐章拆账）",
+        "",
+        "## 三、断点（下一章从这里接）",
+    ]
+    if digest:
+        lines.append(f"- 最近摘要：{digest}")
+    if hook:
+        lines.append(f"- 上章结尾钩子：{hook}")
+    if not digest and not hook:
+        lines.append("- （暂无交付记录——新项目从开弧开始）")
+    lines += ["", "## 四、未回收伏笔"]
+    lines += [f"- {r['title']}（第{r['planted_chapter']}章埋）"
+              for r in ff] or ["- （账本无未回收伏笔）"]
+    changed = _blueprint_changed(d)
+    lines += ["", "## 五、待办提醒"]
+    if changed:
+        lines.append(f"- ⚠ 图纸变更未确认：{'、'.join(changed)}"
+                     "（建议回扫+再确认）")
+    for a in arcs:
+        if not _arcnet_archived(d, a["no"]) and max_ch >= a["end"]:
+            lines.append(f"- 弧{a['no']}《{a['title']}》已写完但漂移网未归档"
+                         "（弧末治理未闭环）")
+    if lines[-1] == "## 五、待办提醒":
+        lines.append("- （无——弧弧有网，图纸无变更）")
+    return {"markdown": NL.join(lines) + NL}
+
+
+class HandoverSaveIn(BaseModel):
+    project: str
+    markdown: str
+
+
+@router.post("/longform/handover/save")
+def handover_save(body: HandoverSaveIn):
+    """交接草稿落盘项目根：00_交接汇总-草稿-*.md（永不覆盖，撞名加序号）——
+    用户手改的 00_交接汇总.md 永远不被机器碰。"""
+    if not (body.markdown or "").strip():
+        raise HTTPException(400, "草稿为空，拒绝落盘")
+    cfg = appstate.load_config()
+    d = _project_dir(cfg, body.project)
+    if not _is_longform(d):
+        raise HTTPException(400, "该项目不是长篇模式")
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    f, k = d / f"00_交接汇总-草稿-{stamp}.md", 2
+    while f.exists():
+        f = d / f"00_交接汇总-草稿-{stamp}-{k}.md"
+        k += 1
+    f.write_text(body.markdown.strip() + chr(10),
+                 encoding="utf-8", newline=chr(10))
+    return {"ok": True, "file": f.name,
+            "cli": "网页落盘 = 草稿存项目根 00_交接汇总-草稿-*.md（不覆盖手写版）"}
+
+
 class ArcCreateIn(BaseModel):
     project: str
     title: str
@@ -1582,6 +1880,7 @@ def longform_arc_create(body: ArcCreateIn):
         sec.append("| （本弧无预设硬数字——正文出现关键数字时回填本表） | — |")
     with nums.open("a", encoding="utf-8", newline=NL) as f:
         f.write(NL.join(sec) + NL)
+    _blueprint_baseline(d, refresh=True)  # 开弧=人工图纸动作：基线同步
     return {"ok": True, "arc_no": no, "outline_block": block.strip(),
             "numbers_rows": len(sec) - 3,
             "cli": "网页开弧 = 在 outline.md 追加弧块 + bible/硬数字表.md 追加节"}

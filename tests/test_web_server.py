@@ -1272,6 +1272,93 @@ class TestWebServer(unittest.TestCase):
             cfg["routing"].pop("write_mass", None)
             appstate.save_config(cfg, self.cfg_path)
 
+    def test_longform_arcanet_handover_blueprint(self):
+        """v0.11.3 阶段 D：漂移网指令包+归档（永不覆盖）、交接汇总草稿+落盘、
+        图纸 hash 检测（外部改动→变更旗→回扫→再确认清除）。"""
+        self.client.post("/app/api/projects/create", json={
+            "name": "治理书", "mode": "longform"})
+        self.client.post("/app/api/longform/arc_create", json={
+            "project": "治理书", "title": "弧甲", "start": 1, "end": 5,
+            "anchors": "锚点X", "tension": "张力Y", "hooks": "勾稽Z",
+            "numbers": [{"name": "旧案人数", "value": "总队39"}]})
+        ws = Path(self.tmp.name) / "ws" / "治理书"
+        # 首次 g0：基线自动建，无变更（开弧已同步基线）
+        g0v = self.client.get("/app/api/longform/g0",
+                              params={"project": "治理书",
+                                      "chapter_no": 1}).json()
+        self.assertEqual(g0v["blueprint_changed"], [])
+        # 外部直改 outline.md → 变更旗亮起（§5.3 防线4：hash 检测）
+        outline = ws / "outline.md"
+        outline.write_text(outline.read_text(encoding="utf-8")
+                           + chr(10) + "<!-- 外部手改 -->", encoding="utf-8")
+        g0v2 = self.client.get("/app/api/longform/g0",
+                               params={"project": "治理书",
+                                       "chapter_no": 1}).json()
+        self.assertIn("outline.md", g0v2["blueprint_changed"])
+        rs = self.client.post("/app/api/longform/retroscan",
+                              json={"project": "治理书"}).json()
+        self.assertIn("exit_code", rs) and self.assertIn("report", rs)
+        rc = self.client.post("/app/api/longform/blueprint_confirm",
+                              json={"project": "治理书"})
+        self.assertEqual(rc.status_code, 200)
+        g0v3 = self.client.get("/app/api/longform/g0",
+                               params={"project": "治理书",
+                                       "chapter_no": 1}).json()
+        self.assertEqual(g0v3["blueprint_changed"], [])  # 再确认清除
+        # 漂移网指令包（清单模式）+ 404
+        net = self.client.get("/app/api/longform/arcanet",
+                              params={"project": "治理书", "arc_no": 1}).json()
+        self.assertIn("弧1《弧甲》", net["prompt"])
+        self.assertIn("旧案人数", net["prompt"])
+        self.assertIn("第 1-5 章", net["prompt"])
+        self.assertIn("清单", net["prompt"])
+        self.assertIn("三分诊断", net["prompt"])
+        nf = self.client.get("/app/api/longform/arcanet",
+                             params={"project": "治理书", "arc_no": 9})
+        self.assertEqual(nf.status_code, 404)
+        # 归档 + 撞名不覆盖
+        a1 = self.client.post("/app/api/longform/arcanet/archive", json={
+            "project": "治理书", "arc_no": 1, "report": "复检：通过"})
+        a2 = self.client.post("/app/api/longform/arcanet/archive", json={
+            "project": "治理书", "arc_no": 1, "report": "复检：通过（复跑）"})
+        self.assertEqual(a1.status_code, 200)
+        self.assertEqual(a2.status_code, 200)
+        self.assertNotEqual(a1.json()["file"], a2.json()["file"])
+        rep_dir = ws / "整合" / "一致性报告"
+        self.assertEqual(len(list(rep_dir.glob("弧1-漂移网-*.md"))), 2)
+        # 交付一章（带 G0 钩子）→ 交接汇总：进度/钩子/弧状态/落盘
+        self.client.post("/app/api/save", json={
+            "project": "治理书", "pack": "luxun", "chapter_no": 1,
+            "title": "交接章", "text": "正文若干。", "checks": {},
+            "usage": {}, "g0": {"anchor": "a", "hero_state": "b",
+                                "arc_pos": "c", "foreshadow": "d",
+                                "quirks": "e", "ending_hook": "门外有脚步",
+                                "bridge": "g"}})
+        ho = self.client.get("/app/api/longform/handover",
+                             params={"project": "治理书"}).json()
+        md = ho["markdown"]
+        self.assertIn("## 一、进度", md)
+        self.assertIn("门外有脚步", md)
+        self.assertIn("图纸未确认", md)
+        self.assertIn("漂移网已归档", md)
+        self.assertIn("## 四、未回收伏笔", md)
+        hs = self.client.post("/app/api/longform/handover/save", json={
+            "project": "治理书", "markdown": md})
+        self.assertEqual(hs.status_code, 200)
+        self.assertTrue(any(ws.glob("00_交接汇总-草稿-*.md")))
+        # 轻量项目：弧末工具全部拒绝
+        self.client.post("/app/api/projects/create", json={"name": "治理轻"})
+        for method, url, payload in (
+                ("GET", "/app/api/longform/arcanet", None),
+                ("GET", "/app/api/longform/handover", None)):
+            r = (self.client.get(url, params={"project": "治理轻",
+                                              "arc_no": 1})
+                 if method == "GET" else self.client.post(url, json=payload))
+            self.assertEqual(r.status_code, 400, url)
+        r = self.client.post("/app/api/longform/retroscan",
+                             json={"project": "治理轻"})
+        self.assertEqual(r.status_code, 400)
+
     def test_numbers_check_script(self):
         """v0.11.1 B-3：数字对照脚本三分类（口径缺失/表外分级/豁免/约略）+
         --all 回扫 + 中文数字解析单元。"""

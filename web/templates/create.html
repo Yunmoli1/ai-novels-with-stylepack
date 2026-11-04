@@ -37,6 +37,8 @@
   <label>项目 <select id="project" onchange="switchProject()"></select></label>
   <button class="btn ghost" onclick="newProject()">＋ 新建项目</button>
   <button class="btn ghost" id="btn_arc" style="display:none" onclick="newArc()">开新弧</button>
+  <button class="btn ghost" id="btn_net" style="display:none" onclick="arcNet()">弧末漂移网</button>
+  <button class="btn ghost" id="btn_ho" style="display:none" onclick="handoverDoc()">交接汇总</button>
   <label>风格包 <select id="pack" onchange="loadPresets()"></select></label>
   <label>章节号 <input id="chapter_no" type="number" value="1" style="width:80px" onchange="loadG0()"></label>
   <label>章节题 <input id="title" style="width:200px" placeholder="如 尸潮前夜"></label>
@@ -56,6 +58,8 @@
 <div id="assembly" class="panel" style="display:none"></div>
 
 <div id="step_g0" class="panel" style="display:none"></div>
+
+<div id="arctools" class="panel" style="display:none"></div>
 
 <div id="step_outline" style="display:none">
 <h2>第一级 · 立意确认</h2>
@@ -231,7 +235,10 @@ async function newProject() {
 }
 function syncArcBtn() {
   const cur = (S.projects || []).find(p => p.name === $('project').value);
-  $('btn_arc').style.display = cur && cur.longform ? '' : 'none';
+  const lf = !!(cur && cur.longform);
+  $('btn_arc').style.display = lf ? '' : 'none';
+  $('btn_net').style.display = lf ? '' : 'none';
+  $('btn_ho').style.display = lf ? '' : 'none';
 }
 async function newArc() {
   const title = prompt('弧名（本弧的张力主题，如：敲门与旧账）：');
@@ -460,6 +467,16 @@ function g0Ready() {
 function renderG0() {
   const d = S.g0info;
   const probeTag = d.probe ? '｜<span style="color:var(--warn)">🎯 探针章</span>' : '';
+  const bp = (d.blueprint_changed || []).length ? `
+    <div class="panel" style="border:1px solid var(--bad);margin:6px 0">
+      <strong style="color:var(--bad)">⚠ 图纸变更未确认：${d.blueprint_changed.map(esc).join('、')}</strong>
+      <p class="meta">基线确认后图纸被改动——已写章节可能基于旧图纸。建议先回扫再写作。</p>
+      <div class="genrow">
+        <button class="btn ghost" onclick="retroscan()">账本回扫（--all，0 token）</button>
+        <button class="btn ghost" onclick="reconfirmBlueprint()">我已核对变更，重新确认图纸</button>
+      </div>
+      <pre class="meta" id="rs_out" style="display:none;white-space:pre-wrap;max-height:200px;overflow:auto"></pre>
+    </div>` : '';
   const arcCard = d.arc ? `
     <div class="panel" style="margin:6px 0">
       <strong>弧简报卡（G-0.5 图纸门）· 弧${d.arc.no}《${esc(d.arc.title)}》第${d.arc.start}-${d.arc.end}章</strong>${probeTag}
@@ -470,7 +487,7 @@ function renderG0() {
         ? '<p class="meta" style="color:var(--good)">✓ 图纸已确认（弧前已对照原作过目，留痕于卷纲）</p>'
         : `<button class="btn" onclick="confirmArc(${d.arc.no})">确认图纸：我已对照原作过目本弧简报卡</button>`}
     </div>` : '';
-  $('step_g0').innerHTML = `<h3>写前简报 G0（七字段——缺一不生成，预填自弧块/记忆，可改）</h3>${arcCard}
+  $('step_g0').innerHTML = `<h3>写前简报 G0（七字段——缺一不生成，预填自弧块/记忆，可改）</h3>${bp}${arcCard}
     ${G0_FIELDS.map(([k, label]) =>
       `<label>${label}<input id="g0_${k}" style="width:100%" value="${esc((S.g0 || {})[k] || '')}" oninput="g0Input()"></label>`).join('')}
     ${d.arc ? `<label>章类型（量产走 write_mass 便宜档，关键章走高档写作模型）
@@ -553,6 +570,83 @@ function overBudget() {
   if (!confirm('显式确认：我知道本章已超止损线，仍要继续生成/修订（本次会话内有效）。')) return;
   S.overBudget = true;
   toast('已解锁本次超支——换模型仍是更便宜的杠杆', 'warn');
+}
+// ---- 弧末治理（v0.11.3 阶段 D）：漂移网 / 交接汇总 / 图纸变更 ----
+function currentArcNo() {
+  const a = S.g0info && S.g0info.arc;
+  return a ? a.no : 0;
+}
+async function retroscan() {
+  try {
+    const r = await post('/app/api/longform/retroscan',
+      { project: $('project').value });
+    const el = $('rs_out');
+    if (el) {
+      el.style.display = '';
+      el.textContent = r.report || '（无输出）';
+    }
+    toast(r.exit_code === 0 ? '回扫完成：无发现项' : '回扫完成：有发现项，见报告', r.exit_code === 0 ? 'good' : 'bad');
+  } catch (e) { toast(e.message, 'bad'); }
+}
+async function reconfirmBlueprint() {
+  if (!confirm('确认图纸基线重置？前提：你已核对全部变更（必要时先跑回扫）。')) return;
+  try {
+    await post('/app/api/longform/blueprint_confirm', { project: $('project').value });
+    toast('图纸基线已重置（blueprint.json）', 'good');
+    loadG0();
+  } catch (e) { toast(e.message, 'bad'); }
+}
+function showArcTool(title, text, note) {
+  $('arctools').style.display = '';
+  $('arctools').innerHTML = `<h3>${esc(title)}</h3>
+    ${note ? `<p class="meta">${esc(note)}</p>` : ''}
+    <textarea id="at_text" rows="14" style="width:100%">${esc(text)}</textarea>
+    <div class="genrow">
+      <button class="btn ghost" onclick="navigator.clipboard.writeText(document.getElementById('at_text').value).then(()=>toast('已复制全文','good'))">复制全文</button>
+      <span id="at_out" class="meta"></span>
+    </div>`;
+  $('arctools').scrollIntoView({ behavior: 'smooth' });
+}
+async function arcNet() {
+  const no = prompt('漂移网目标弧号：', currentArcNo() || '1');
+  if (!no) return;
+  try {
+    const d = await (await fetch('/app/api/longform/arcanet?project='
+      + encodeURIComponent($('project').value) + '&arc_no=' + (+no))).json();
+    showArcTool(`弧${no}《${d.arc.title}》漂移网指令包（复制到独立会话/子代理执行）`,
+      d.prompt, `审查范围：第 ${d.chapters[0]}-${d.chapters[1]} 章——清单模式（硬数字逐条+伏笔动作+节拍落位），不做五维全量。`);
+    $('arctools').innerHTML += `
+      <details><summary class="meta">审查完成？粘贴报告归档（整合/一致性报告/，永不覆盖）</summary>
+        <textarea id="at_report" rows="6" style="width:100%"></textarea>
+        <button class="btn" onclick="archiveNet(${+no})">归档报告</button></details>`;
+  } catch (e) { toast(e.message, 'bad'); }
+}
+async function archiveNet(no) {
+  const rep = $('at_report').value;
+  if (!rep.trim()) return toast('报告为空', 'bad');
+  try {
+    const r = await post('/app/api/longform/arcanet/archive',
+      { project: $('project').value, arc_no: no, report: rep });
+    $('at_out').textContent = '已归档：' + r.file;
+    toast('漂移网报告已归档', 'good');
+  } catch (e) { toast(e.message, 'bad'); }
+}
+async function handoverDoc() {
+  try {
+    const d = await (await fetch('/app/api/longform/handover?project='
+      + encodeURIComponent($('project').value))).json();
+    showArcTool('一键交接汇总（草稿——进度/成本/断点/伏笔/待办）', d.markdown, '');
+    $('arctools').innerHTML += `
+      <div class="genrow"><button class="btn ghost" onclick="saveHandover()">落盘草稿（项目根，永不覆盖手写版）</button></div>`;
+  } catch (e) { toast(e.message, 'bad'); }
+}
+async function saveHandover() {
+  try {
+    const r = await post('/app/api/longform/handover/save',
+      { project: $('project').value, markdown: $('at_text').value });
+    $('at_out').textContent = '已落盘：' + r.file;
+    toast('交接草稿已落盘项目根', 'good');
+  } catch (e) { toast(e.message, 'bad'); }
 }
 async function confirmArc(no) {
   try {
