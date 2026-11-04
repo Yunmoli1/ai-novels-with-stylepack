@@ -25,6 +25,7 @@ import routes_distill  # noqa: E402
 import routes_memory  # noqa: E402
 import routes_bible  # noqa: E402
 import routes_history  # noqa: E402
+import routes_serial  # noqa: E402
 
 TEMPLATES = Jinja2Templates(directory=str(WEB / "templates"))
 
@@ -37,6 +38,9 @@ def create_app(site_dir: Path | None = None) -> FastAPI:
     app.include_router(routes_memory.router)
     app.include_router(routes_bible.router)
     app.include_router(routes_history.router)
+    app.include_router(routes_serial.router)
+    app.mount("/static", StaticFiles(directory=str(WEB / "static")),
+              name="static")
 
     @app.get("/app/history")
     async def history_page(request: Request):
@@ -62,6 +66,12 @@ def create_app(site_dir: Path | None = None) -> FastAPI:
     async def create_page(request: Request):
         return TEMPLATES.TemplateResponse(
             request=request, name="create.html", context={"active": "create",
+                                                  "version": appstate.workbench_version()})
+
+    @app.get("/app/serial")
+    async def serial_page(request: Request):
+        return TEMPLATES.TemplateResponse(
+            request=request, name="serial.html", context={"active": "serial",
                                                   "version": appstate.workbench_version()})
 
     @app.get("/app/distill")

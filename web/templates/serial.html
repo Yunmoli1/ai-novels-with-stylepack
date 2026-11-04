@@ -1,0 +1,210 @@
+{% extends "base.html" %}
+{% block title %}连载管理台{% endblock %}
+{% block main %}
+<style>
+  .serial-grid{display:grid;grid-template-columns:320px minmax(0,1fr) 360px;gap:14px;align-items:start}
+  @media (max-width:1180px){.serial-grid{grid-template-columns:1fr}}
+  .trow{display:flex;gap:6px;align-items:center;padding:2px 0;font-size:13px;border-bottom:1px dashed var(--panel2)}
+  .trow .nm{cursor:pointer;flex:0 0 auto}
+  .trow .src{color:var(--muted);font-size:11.5px;flex:1;text-align:right}
+  .trow.ig{opacity:.45}
+  .trow a{margin-left:4px}
+</style>
+<h1>连载管理台</h1>
+<p class="meta">流程：开弧 → 图纸确认 → 手写探针章（前 2 章）→ 量产连跑中段 → 弧末漂移网 → 交接汇总。
+左栏=约束口（规范层档案+项目文件树），中栏=本章工作流，右栏=运行态（预算/记忆/总结卡）。</p>
+
+<div class="panel genrow">
+  <label>项目 <select id="project" onchange="switchProject()"></select></label>
+  <button class="btn ghost" onclick="newProject()">＋ 新建项目</button>
+  <button class="btn ghost" id="btn_arc" style="display:none" onclick="newArc()">开新弧</button>
+  <button class="btn ghost" id="btn_net" style="display:none" onclick="arcNet()">弧末漂移网</button>
+  <button class="btn ghost" id="btn_ho" style="display:none" onclick="handoverDoc()">交接汇总</button>
+  <button class="btn ghost" id="btn_batch" style="display:none" onclick="batchPlan()">量产连跑</button>
+  <a class="btn ghost" href="/app/history">看板/历史</a>
+  <a class="btn ghost" href="/app/bible">档案编辑器</a>
+</div>
+
+<div id="arctools" class="panel" style="display:none"></div>
+
+<div class="serial-grid">
+<!-- 左栏：约束口 + 项目文件树 -->
+<div>
+  <div class="panel">
+    <h3 style="margin-top:0">约束口·规范层</h3>
+    <p class="meta">规范层工件在此可见；编辑走档案编辑器（JSON 校验+乐观锁在那里）。
+    正文与规范层冲突 = 停写上报，不许圆稿。</p>
+    <div class="genrow">
+      <a class="btn ghost" href="/app/bible">编辑档案</a>
+      <button class="btn ghost" onclick="loadTree('')">树回根目录</button>
+      <button class="btn ghost" onclick="openFolder()">资源管理器</button>
+    </div>
+  </div>
+  <div class="panel">
+    <h3 style="margin-top:0">项目文件树</h3>
+    <div id="tree_crumb" class="meta"></div>
+    <div id="tree" style="max-height:430px;overflow:auto"></div>
+    <div id="fileview" style="display:none">
+      <h4 id="fv_title" style="margin:6px 0"></h4>
+      <pre id="fv_text" class="meta" style="white-space:pre-wrap;max-height:300px;overflow:auto"></pre>
+      <div class="genrow">
+        <button class="btn ghost" onclick="downloadFile()">下载原文件</button>
+        <button class="btn ghost" onclick="$('fileview').style.display='none'">收起</button>
+        <span id="fv_out" class="meta"></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 中栏：本章工作流（ID 与单章页同源，复用 creation.js） -->
+<div>
+  <div class="panel">
+    <label>风格包 <select id="pack" onchange="loadPresets()"></select></label>
+    <label>章节号 <input id="chapter_no" type="number" value="1" style="width:80px" onchange="loadG0()"></label>
+    <label>章节题 <input id="title" style="width:200px" placeholder="如 尸潮前夜"></label>
+    <label>关键词（顿号分隔）<input id="keywords" style="width:240px" placeholder="人物/物件/本章涉及"></label>
+    <label>字数挡位 <select id="char_tier" onchange="tierChange()">
+      <option value="1500">短章 ≈1500 字</option>
+      <option value="2500" selected>标准 ≈2500 字</option>
+      <option value="4000">长章 ≈4000 字</option>
+      <option value="6000">特长 ≈6000 字</option>
+      <option value="custom">自定义…</option>
+    </select></label>
+    <input id="target_chars" type="number" min="300" max="20000" step="100" value="2500"
+           style="width:90px;display:none" title="自定义目标字数（300–20000）">
+    <button class="btn" onclick="doAssemble()">装配预览</button>
+  </div>
+
+  <div id="assembly" class="panel" style="display:none"></div>
+  <div id="step_g0" class="panel" style="display:none"></div>
+  <div id="step_outline" style="display:none">
+    <h2>第一级 · 立意确认</h2>
+    <div class="panel" id="options"><p class="meta">点「生成候选」。</p></div>
+    <div class="panel">
+      <label>已选方向（可编辑 JSON）
+        <textarea id="chosen_json" rows="6" placeholder='{"title":"方向名","angle":"题材角度","action":"立意动作","stance":"价值姿态"}'></textarea></label>
+      <button class="btn ghost" onclick="doOutline()">重新生成候选</button>
+      <button class="btn" onclick="lockChosen()">锁定此立意 → 生成拍子表</button>
+    </div>
+  </div>
+  <div id="step_beats" style="display:none">
+    <h2>第二级 · 拍子表</h2>
+    <div class="panel" id="beats"></div>
+    <p class="meta">拍子确认后 → 右栏生成正文。</p>
+  </div>
+</div>
+
+<!-- 右栏：运行态 -->
+<aside class="panel">
+  <h2 style="margin-top:0">生成现场</h2>
+  <div class="stagebar" id="stagebar"></div>
+  <p class="meta" id="genmeta">模型：-｜目标正文 ≈ - 字</p>
+  <div class="genrow">
+    <label>调子声明 <input id="tone_note" list="tone_list" style="width:170px" placeholder="从建议选或自填"></label>
+    <datalist id="tone_list"></datalist>
+    <label>原作锚点 <input id="canon_anchor" list="anchor_list" style="width:200px" placeholder="从建议选或自填"></label>
+    <datalist id="anchor_list"></datalist>
+    <label>稿数 <select id="n_drafts"><option>1</option><option>2</option><option>3</option></select></label>
+    <label><input type="checkbox" id="use_stream" checked> 流式</label>
+  </div>
+  <div class="genrow">
+    <button class="btn" id="btn_generate" disabled onclick="doGenerate()">生成正文</button>
+    <span id="gen_out" class="meta"></span>
+  </div>
+  <div id="budgetbox" class="panel" style="display:none"></div>
+  <div id="drafts"></div>
+  <div class="panel" id="savebox" style="display:none">
+    <label>采用稿 <select id="pick"></select></label>
+    <button class="btn" onclick="doSave()">确认交付（落盘+拆账+探针验收）</button>
+    <button class="btn ghost" onclick="doExport()">导出合并 txt</button>
+    <span id="save_out" class="meta"></span>
+  </div>
+  <div class="panel" id="sumcard" style="display:none">
+    <h3 style="margin:4px 0">本章总结卡</h3>
+    <div id="sumcard_body"></div>
+  </div>
+  <div class="panel" id="memorybox" style="display:none">
+    <h3 style="margin:4px 0">记忆·隔离区</h3>
+    <p class="meta">交付后自动登记（judge 路由）。低风险可直合并；<span style="color:var(--bad)">高风险=core 实体变动/伏笔，须逐条确认</span>。</p>
+    <div id="mem_list"></div>
+  </div>
+</aside>
+</div><!-- /serial-grid -->
+
+<script src="/static/creation.js?v={{ version or '?' }}"></script>
+<script>
+// ---- 连载台专有：项目文件树（只读 + 复用既有执法端点 + OS 逃生门）----
+let curSub = '';
+const esc = s => (s || '').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+let curFile = '';
+async function loadTree(sub) {
+  curSub = sub || '';
+  try {
+    const d = await (await fetch('/app/api/serial/tree?project='
+      + encodeURIComponent($('project').value) + '&sub=' + encodeURIComponent(curSub))).json();
+    $('tree_crumb').innerHTML = '项目根' + (curSub ? ' / ' + esc(curSub)
+      + ` <a href="javascript:void(0)" onclick="loadTree('')">↑ 上一级</a>` : '');
+    $('tree').innerHTML = d.entries.map(e => {
+      const nm = e.dir
+        ? `<span class="nm" onclick="loadTree('${esc(e.rel)}')">📁 ${esc(e.name)}/</span>`
+        : `<span class="nm" onclick="previewFile('${esc(e.rel)}')">📄 ${esc(e.name)}</span>`;
+      const acts = [];
+      if (!e.dir && !e.binary) acts.push(`<a href="javascript:void(0)" onclick="previewFile('${esc(e.rel)}')">预览</a>`);
+      if (e.rel.startsWith('manuscript/') && e.rel.endsWith('.md')) {
+        acts.push(`<a href="javascript:void(0)" onclick="renameCh('${esc(e.name)}','')">改名</a>`);
+        acts.push(`<a href="javascript:void(0)" onclick="deleteCh('${esc(e.name)}')">删除</a>`);
+      }
+      if (!e.dir) acts.push(`<a href="/app/api/serial/download?project=${encodeURIComponent($('project').value)}&path=${encodeURIComponent(e.rel)}">下载</a>`);
+      return `<div class="trow${e.ignored ? ' ig' : ''}" title="${esc(e.source || '')}${e.ignored ? '｜运行态文件（不入库）' : ''}">${nm}
+        <span class="src">${esc(e.source || '')}${e.ignored ? ' · 不入库' : ''}｜${(e.size / 1024).toFixed(1)}k</span>${acts.join('')}</div>`;
+    }).join('') || '<p class="meta">（空目录）</p>';
+  } catch (e) { $('tree').innerHTML = '<p class="meta">' + e.message + '</p>'; }
+}
+async function previewFile(rel) {
+  try {
+    const d = await (await fetch('/app/api/serial/file?project='
+      + encodeURIComponent($('project').value) + '&path=' + encodeURIComponent(rel))).json();
+    curFile = rel;
+    $('fileview').style.display = '';
+    $('fv_title').textContent = d.path + (d.source ? '｜' + d.source : '')
+      + `｜${(d.size / 1024).toFixed(1)}k` + (d.binary ? '｜二进制文件（只可下载）' : '');
+    $('fv_text').textContent = d.binary ? '（二进制）' : d.text
+      + (d.truncated ? '\n…（已截断，全文用「下载原文件」）' : '');
+    $('fileview').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  } catch (e) { toast(e.message, 'bad'); }
+}
+function downloadFile() {
+  if (!curFile) return;
+  window.open('/app/api/serial/download?project='
+    + encodeURIComponent($('project').value) + '&path=' + encodeURIComponent(curFile));
+}
+async function openFolder() {
+  try {
+    const r = await post('/app/api/serial/open_folder', { project: $('project').value });
+    toast('已在资源管理器打开：' + r.path, 'good');
+  } catch (e) { toast(e.message, 'bad'); }
+}
+async function renameCh(file, old) {
+  const t = prompt('新的章节题（章号保留）：', old || file.replace(/^\d+-/, '').replace(/\.md$/, ''));
+  if (t === null || !t.trim()) return;
+  try {
+    const r = await post('/app/api/history/chapter_rename',
+      { project: $('project').value, file, new_title: t });
+    toast('已改名 → ' + r.file, 'good');
+    loadTree(curSub);
+  } catch (e) { toast(e.message, 'bad'); }
+}
+async function deleteCh(file) {
+  if (!confirm(`删除 ${file}？文件移入 manuscript/.trash/ 可手动恢复。`)) return;
+  try {
+    await post('/app/api/history/chapter_delete',
+      { project: $('project').value, file });
+    toast('已删除（.trash 可恢复）', 'good');
+    loadTree(curSub);
+  } catch (e) { toast(e.message, 'bad'); }
+}
+// 项目切换后刷新树（creation.js 的 switchProject 已跑完自身职责）
+document.getElementById('project').addEventListener('change', () => loadTree(''));
+loadTree('');
+</script>
+{% endblock %}

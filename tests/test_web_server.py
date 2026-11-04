@@ -469,13 +469,16 @@ class TestWebServer(unittest.TestCase):
         self.assertEqual(LAST["payload"]["max_tokens"], 3500)  # 配置兜底
 
     def test_create_page_sidebar(self):
-        """v0.6.4 生成现场侧栏：页面可达、侧栏与流式端点在模板中。"""
+        """v0.6.4 生成现场侧栏：页面可达、侧栏在模板中；v0.13.0 起逻辑抽到
+        共享 creation.js（与连载台同源），页面只留外链。"""
         r = self.client.get("/app/create")
         self.assertEqual(r.status_code, 200)
         self.assertIn("生成现场", r.text)
-        self.assertIn("generate_stream", r.text)
+        self.assertIn("/static/creation.js", r.text)
+        js = self.client.get("/static/creation.js").text
+        self.assertIn("generate_stream", js)
+        self.assertIn("loadSlot", js)
         self.assertIn("方案槽", r.text)  # v0.6.6
-        self.assertIn("loadSlot", r.text)
 
     def test_slots_capture_update_restore(self):
         """v0.6.6 方案槽：装配入槽 → 同指纹复用原槽 → 立意/拍子/上次稿写回
@@ -1501,6 +1504,77 @@ class TestWebServer(unittest.TestCase):
         lw = self.client.post("/app/api/longform/batch/report", json={
             "project": "连跑轻", "pack": "luxun", "start": 1, "end": 1})
         self.assertEqual(lw.status_code, 400)
+
+    def test_serial_page_and_tree(self):
+        """v0.13.0：连载管理台页面 + 共享 creation.js 抽取（create 页零内联）
+        + 文件树（来源标注/子目录/灰标）+ 预览截断 + traversal 拦截 + 下载
+        + 资源管理器逃生门（patch 不真开）。"""
+        from unittest.mock import patch
+        import routes_serial
+        # 共享脚本可达且 create 页已改为外链（单章页零内联——双入口同源）
+        r = self.client.get("/static/creation.js")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("async function doAssemble", r.text)
+        cr = self.client.get("/app/create")
+        self.assertEqual(cr.status_code, 200)
+        self.assertIn("/static/creation.js", cr.text)
+        self.assertNotIn("async function doAssemble", cr.text)
+        # 连载台页面：三栏壳关键件齐
+        pg = self.client.get("/app/serial")
+        self.assertEqual(pg.status_code, 200)
+        for mark in ("项目文件树", "step_g0", "sumcard", "budgetbox",
+                     "serial-grid", "/static/creation.js"):
+            self.assertIn(mark, pg.text)
+        # 树：顶层目录 + 来源标注
+        t = self.client.get("/app/api/serial/tree",
+                            params={"project": "测试项目"}).json()
+        names = {e["name"] for e in t["entries"]}
+        self.assertIn("manuscript", names) and self.assertIn("bible", names)
+        man = next(e for e in t["entries"] if e["name"] == "manuscript")
+        self.assertEqual(man["source"], "交付落盘")
+        # 子目录 + 文件条目
+        t2 = self.client.get("/app/api/serial/tree",
+                             params={"project": "测试项目",
+                                     "sub": "manuscript"}).json()
+        f = next(e for e in t2["entries"] if e["rel"].startswith("manuscript/001"))
+        # 预览（小文件不截断）
+        fv = self.client.get("/app/api/serial/file",
+                             params={"project": "测试项目",
+                                     "path": f["rel"]}).json()
+        self.assertIn("大比目鱼", fv["text"])
+        self.assertFalse(fv["truncated"])
+        # traversal 拦截（树与文件两路）
+        for bad in ("../stylepacks", "manuscript/../../x"):
+            self.assertEqual(self.client.get(
+                "/app/api/serial/tree",
+                params={"project": "测试项目", "sub": bad}).status_code, 400, bad)
+        self.assertEqual(self.client.get(
+            "/app/api/serial/file",
+            params={"project": "测试项目",
+                    "path": "../../config.local.json"}).status_code, 400)
+        # 下载
+        dl = self.client.get("/app/api/serial/download",
+                             params={"project": "测试项目", "path": f["rel"]})
+        self.assertEqual(dl.status_code, 200)
+        # 大文件截断
+        big = Path(self.tmp.name) / "ws" / "测试项目" / "manuscript" / "099-大.md"
+        big.write_text("字" * 40000, encoding="utf-8")
+        fv2 = self.client.get("/app/api/serial/file",
+                              params={"project": "测试项目",
+                                      "path": "manuscript/099-大.md"}).json()
+        self.assertTrue(fv2["truncated"])
+        big.unlink()
+        # 资源管理器逃生门：patch 真实打开，只验守卫与调用
+        with patch.object(routes_serial, "_open_folder") as m:
+            of = self.client.post("/app/api/serial/open_folder",
+                                  json={"project": "测试项目"})
+            self.assertEqual(of.status_code, 200)
+            m.assert_called_once()
+        with patch.object(routes_serial, "_open_folder") as m2:
+            bad = self.client.post("/app/api/serial/open_folder",
+                                   json={"project": "../x"})
+            self.assertEqual(bad.status_code, 400)
+            m2.assert_not_called()
 
     def test_numbers_check_script(self):
         """v0.11.1 B-3：数字对照脚本三分类（口径缺失/表外分级/豁免/约略）+
