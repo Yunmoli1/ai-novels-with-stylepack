@@ -468,6 +468,7 @@ class OutlineIn(BaseModel):
     user_notes: str = ""
     target_chars: int = 0  # 字数挡位（v0.6.3）：0=未指定
     session_id: str | None = None
+    g0: dict = {}  # G0 七字段简报（v0.11.1 B-1；跳过时 {"skipped": true} 留痕）
 
 
 def _session_id(body) -> str:
@@ -507,6 +508,9 @@ def do_outline(body: OutlineIn):
         body.chapter_no, body.keywords, cfg.get("context_budget_tokens", 24000))
     prompt = creation.outline_prompt(body.chapter_no, body.title, body.keywords,
                                      assembly["kept_texts"], body.user_notes)
+    g0t = _g0_text(body.g0)
+    if g0t:
+        prompt += chr(10) * 2 + g0t
     result = _do_model(cfg, "write", sid, prompt, 2200, True)
     return {"session_id": sid, "options": result["json"].get("options", []),
             "recommended": result["json"].get("recommended", 0),
@@ -531,6 +535,9 @@ def do_beats(body: BeatsIn):
     prompt = creation.beats_prompt(body.chapter_no, body.title, body.chosen,
                                    assembly["kept_texts"], canon_note,
                                    _clean_target_chars(body.target_chars))
+    g0t = _g0_text(body.g0)
+    if g0t:
+        prompt += chr(10) * 2 + g0t
     result = _do_model(cfg, "write", sid, prompt, 2400, True)
     return {"session_id": sid, **result["json"], "usage": result}
 
@@ -551,6 +558,9 @@ def do_reroll(body: RerollIn):
                                          body.beats, body.index,
                                          assembly["kept_texts"],
                                          _clean_target_chars(body.target_chars))
+    g0t = _g0_text(body.g0)
+    if g0t:
+        prompt += chr(10) * 2 + g0t
     result = _do_model(cfg, "write", sid, prompt, 600, True)
     return {"session_id": sid, "beat": result["json"], "usage": result}
 
@@ -575,7 +585,11 @@ def _prep_generate(cfg: dict, body: GenerateIn) -> dict:
                                    body.beats, body.tone_note, body.canon_anchor,
                                    assembly["kept_texts"],
                                    target or cfg.get("prose_max_tokens", 3500) * 2 // 3)
-    return {"pack_dir": pack_dir, "assembly": assembly, "prompt": prompt,
+    g0t = _g0_text(getattr(body, "g0", None))
+    if g0t:
+        prompt = prompt + chr(10) * 2 + g0t
+    return {"pack_dir": pack_dir, "project_dir": project_dir,
+            "assembly": assembly, "prompt": prompt,
             "budget": _prose_budget(cfg, target), "target": target}
 
 
@@ -586,6 +600,9 @@ def do_generate(body: GenerateIn):
     prep = _prep_generate(cfg, body)
     pack_dir, assembly, prompt, budget = (prep["pack_dir"], prep["assembly"],
                                           prep["prompt"], prep["budget"])
+    project_dir = prep["project_dir"]
+    ledger = str(project_dir / "bible" / "硬数字表.md")
+    longform = _is_longform(project_dir)
     drafts = []
     with tempfile.TemporaryDirectory() as td:
         for i in range(max(1, min(3, body.n_drafts))):
@@ -597,9 +614,13 @@ def do_generate(body: GenerateIn):
                                                    "--pack", str(pack_dir)])
             aic = _run_gate("ai_cliche_check.py", [str(draft_path),
                                                    "--pack", str(pack_dir)])
+            nums = (_run_gate("numbers_check.py", [str(draft_path), "--ledger",
+                                                   ledger, "--chapter",
+                                                   str(body.chapter_no)])
+                    if longform else None)
             drafts.append({"text": result["text"], "usage": result,
                            "fp_check": fp, "borrow_check": borrow,
-                           "ai_cliche": aic})
+                           "ai_cliche": aic, "numbers_check": nums})
     return {"session_id": sid, "drafts": drafts,
             "assembly_preview": assembly["items"],
             "assembly_tokens": assembly["total_est_tokens"]}
@@ -614,9 +635,12 @@ def _sse(type_: str, **fields) -> str:
 
 def _stream_one_draft(cfg: dict, sid: str, prompt: str, budget: int,
                       pack_dir: Path, index: int, done_event: str = "draft_done",
-                      extra: dict | None = None):
+                      extra: dict | None = None,
+                      numbers_ctx: dict | None = None):
     """产出一个稿的事件序列：流式优先；空稿/流式不可用回退非流加倍链（v0.6.2）。
-    结尾必发 done_event（成功）或 error（失败）——前端按此收口。"""
+    结尾必发 done_event（成功）或 error（失败）——前端按此收口。
+    numbers_ctx（v0.11.1 B-3）：{"ledger": 路径, "chapter": 章号}——长篇项目
+    交付前数字对照（advisory 报不拦），None=轻量项目跳过。"""
     base, key, model = _resolve_model(cfg, "write")
     messages = [{"role": "system", "content": creation.SYSTEM},
                 {"role": "user", "content": prompt}]
@@ -672,9 +696,14 @@ def _stream_one_draft(cfg: dict, sid: str, prompt: str, budget: int,
                                                "--pack", str(pack_dir)])
         aic = _run_gate("ai_cliche_check.py", [str(draft_path),
                                                "--pack", str(pack_dir)])
+        nums = (_run_gate("numbers_check.py", [str(draft_path), "--ledger",
+                                               numbers_ctx["ledger"],
+                                               "--chapter",
+                                               str(numbers_ctx["chapter"])])
+                if numbers_ctx else None)
     yield _sse(done_event, index=index, text=text, usage=usage,
                fp_check=fp, borrow_check=borrow, ai_cliche=aic,
-               **(extra or {}))
+               numbers_check=nums, **(extra or {}))
 
 
 def _short(exc: Exception, n: int = 120) -> str:
@@ -695,8 +724,13 @@ def do_generate_stream(body: GenerateIn):
                    assembly_tokens=prep["assembly"]["total_est_tokens"])
         for i in range(max(1, min(3, body.n_drafts))):
             yield _sse("draft_start", index=i)
+            nctx = None
+            if (prep["project_dir"] / LONGFORM_MARKER).is_file():
+                nctx = {"ledger": str(prep["project_dir"]
+                                      / "bible" / "硬数字表.md"),
+                        "chapter": body.chapter_no}
             yield from _stream_one_draft(cfg, sid, prep["prompt"], prep["budget"],
-                                         prep["pack_dir"], i)
+                                         prep["pack_dir"], i, numbers_ctx=nctx)
         yield _sse("all_done", assembly_tokens=prep["assembly"]["total_est_tokens"])
 
     return StreamingResponse(gen(), media_type="text/event-stream",
@@ -894,6 +928,7 @@ class SaveIn(BaseModel):
     target_chars: int = 0
     session_id: str = ""
     assembly_preview: list[dict] = []
+    g0: dict = {}  # v0.11.1 B-1：七字段简报留痕（跳过时 {"skipped": true}）
 
 
 @router.post("/save")
@@ -920,16 +955,26 @@ def do_save(body: SaveIn):
     gitignore = sessions / ".gitignore"
     if not gitignore.is_file():  # 会话记录含创作内容，防误提交
         gitignore.write_text("*\n!.gitignore\n", encoding="utf-8", newline="\n")
+    # v0.11.1 B-1/B-3：G0 留痕 + 交付即数字对照（长篇项目，报不拦）
+    checks = dict(body.checks)
+    nums = None
+    if _is_longform(project_dir):
+        nums = _run_gate("numbers_check.py",
+                         [str(target), "--ledger",
+                          str(project_dir / "bible" / "硬数字表.md"),
+                          "--chapter", str(body.chapter_no)])
+        checks["numbers_check"] = nums
     record = {
         "ts": datetime.datetime.now().isoformat(timespec="seconds"),
-        "tool": "web-create v0.11.0", "session_id": body.session_id,
+        "tool": "web-create v0.11.1", "session_id": body.session_id,
         "project": body.project, "pack": body.pack,
         "chapter_no": body.chapter_no, "title": title,
         "keywords": body.keywords,
         "target_chars": _clean_target_chars(body.target_chars),
         "chosen": body.chosen, "beats": body.beats,
         "tone_note": body.tone_note, "canon_anchor": body.canon_anchor,
-        "checks": body.checks, "usage": body.usage,
+        "g0": body.g0,
+        "checks": checks, "usage": body.usage,
         "assembly": body.assembly_preview,
         "session_totals": _session_totals(body.session_id),
         "output_file": target.name, "text": body.text,
@@ -946,7 +991,7 @@ def do_save(body: SaveIn):
                          session_calls=totals["calls"],
                          note=f"第{body.chapter_no}章《{title}》")
     return {"ok": True, "manuscript": str(target), "sessions_dir": str(sessions),
-            "session_totals": totals}
+            "session_totals": totals, "numbers_check": nums}
 
 
 # ---- 新建项目（v0.10.0：不开 agent 的用户从这里开始第一本书）----
@@ -1107,6 +1152,57 @@ def _parse_arcs(outline_text: str) -> list[dict]:
     return arcs
 
 
+# ---- G0 写前简报（v0.11.1 阶段 B）：七字段表单 + 弧简报卡 + 探针章 ----
+# 治理来源：灾厄前线 G0"缺一不派发"；图纸门 §5.3（v0.12 设想）：
+# 灾厄前线 25 万字事故=大纲细微误差被逐章忠实执行——弧前图纸审+探针章
+# 把结构性误差的修正成本压到 1-2 章。
+
+G0_LABELS = (("anchor", "原作锚点"), ("hero_state", "主角状态"),
+             ("arc_pos", "弧线位置"), ("foreshadow", "伏笔动作"),
+             ("quirks", "出场口癖"), ("ending_hook", "结尾钩子"),
+             ("bridge", "衔接上一章"))
+
+
+def _g0_text(g0: dict | None) -> str:
+    """G0 简报 → 提示词附件（空/跳过返回空串）。缺字段执法在前端
+    （置灰+跳过链接，D4 决策），服务端只透传与留痕。"""
+    if not isinstance(g0, dict) or g0.get("skipped"):
+        return ""
+    lines = []
+    for k, label in G0_LABELS:
+        v = str(g0.get(k, "") or "").strip()
+        if v:
+            lines.append(f"- {label}：{v}")
+    if not lines:
+        return ""
+    return ("【写前简报 G0（七字段，本章写作必须落实）】" + chr(10)
+            + chr(10).join(lines))
+
+
+def _prev_ending_hook(d: Path, chapter_no: int) -> str:
+    """衔接默认值：此前交付章节 G0 登记的结尾钩子（sessions 记录，取最近章）。"""
+    best, hook = -1, ""
+    for j in (d / "sessions").glob("*.json"):
+        try:
+            rec = json.loads(j.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        n = int(rec.get("chapter_no") or 0)
+        h = str((rec.get("g0") or {}).get("ending_hook", "") or "").strip()
+        if 0 < n < chapter_no and n >= best and h:
+            best, hook = n, h
+    return hook[:200]
+
+
+def _arc_confirmed(outline_text: str, arc: dict) -> bool:
+    """图纸确认（G-0.5）：弧块内含「- 图纸确认：」行即已过目。"""
+    i = outline_text.find(f"【弧{arc['no']}·{arc['title']}】")
+    if i < 0:
+        return False
+    j = outline_text.find("### 【", i + 1)
+    return "图纸确认" in outline_text[i:(j if j > 0 else len(outline_text))]
+
+
 @router.get("/longform/status")
 def longform_status(project: str):
     cfg = appstate.load_config()
@@ -1125,6 +1221,93 @@ def longform_status(project: str):
     return {"longform": True, "arcs": arcs, "max_chapter": max_ch,
             "next_arc_no": (arcs[-1]["no"] + 1) if arcs else 1,
             "next_start": max(max_ch + 1, (arcs[-1]["end"] + 1) if arcs else 1)}
+
+
+@router.get("/longform/g0")
+def longform_g0(project: str, chapter_no: int):
+    """G0 写前简报（v0.11.1 B-1）：当前弧定位 + 七字段自动预填（可改）+
+    探针章标记（每弧前 2 章，J9）+ 图纸确认状态 + 硬数字表当前弧节。
+    轻量项目返回 longform=False（前端不出现 G0 表单——回归零变化）。"""
+    cfg = appstate.load_config()
+    d = _project_dir(cfg, project)
+    if not _is_longform(d):
+        return {"longform": False}
+    outline = d / "outline.md"
+    otext = outline.read_text(encoding="utf-8") if outline.is_file() else ""
+    arcs = _parse_arcs(otext)
+    arc = next((a for a in arcs if a["start"] <= chapter_no <= a["end"]), None)
+    brief = {k: "" for k, _ in G0_LABELS}
+    probe = False
+    if arc:
+        off = chapter_no - arc["start"] + 1
+        total = arc["end"] - arc["start"] + 1
+        brief["anchor"] = arc["anchors"]
+        brief["arc_pos"] = (f"弧{arc['no']}《{arc['title']}》第 {off}/{total} 章"
+                            f"（全弧第 {arc['start']}-{arc['end']} 章）")
+        probe = (chapter_no - arc["start"]) < 2  # J9：每弧前 2 章为探针
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
+        from store import Store  # noqa: E402
+        store = Store(d)
+        try:
+            recap = store.recap(3)
+        finally:
+            store.close()
+        recent = recap.get("recent") or []
+        if recent:
+            latest = max(recent, key=lambda r: int(r.get("chapter") or 0))
+            brief["hero_state"] = str(latest.get("digest", ""))[:200]
+        ff = recap.get("open_foreshadow") or []
+        if ff:
+            brief["foreshadow"] = "；".join(
+                f"{r['title']}（第{r['planted_chapter']}章埋，待回收）"
+                for r in ff)[:300]
+    except Exception:  # noqa: BLE001 —— 记忆是增强，绝不阻断
+        pass
+    prev = _prev_ending_hook(d, chapter_no)
+    if prev:
+        brief["bridge"] = prev
+    return {"longform": True, "arc": arc, "probe": probe,
+            "arc_confirmed": bool(arc and _arc_confirmed(otext, arc)),
+            "brief": brief,
+            "numbers_section": assemble_mod.numbers_section(d, chapter_no)}
+
+
+class ArcConfirmIn(BaseModel):
+    project: str
+    arc_no: int
+
+
+@router.post("/longform/arc_confirm")
+def longform_arc_confirm(body: ArcConfirmIn):
+    """弧简报卡确认（G-0.5 图纸门，§5.3）：人对照原作过目本弧图纸后落痕——
+    确认行写进弧块；未确认的弧，前端置灰生成（G0 门的一环）。"""
+    cfg = appstate.load_config()
+    d = _project_dir(cfg, body.project)
+    if not _is_longform(d):
+        raise HTTPException(400, "该项目不是长篇模式")
+    outline = d / "outline.md"
+    if not outline.is_file():
+        raise HTTPException(404, "outline.md 不存在")
+    text = outline.read_text(encoding="utf-8")
+    arc = next((a for a in _parse_arcs(text) if a["no"] == body.arc_no), None)
+    if not arc:
+        raise HTTPException(404, f"弧{body.arc_no} 不存在")
+    if _arc_confirmed(text, arc):
+        return {"ok": True, "already": True}
+    i = text.find(f"### 【弧{arc['no']}·{arc['title']}】")
+    if i < 0:
+        raise HTTPException(500, "弧块定位失败（格式漂移？请手查 outline.md）")
+    j = text.find("- 章数字数：", i)
+    if j < 0:
+        raise HTTPException(500, "弧块缺章数字数行——格式漂移，请手查 outline.md")
+    eol = text.find(chr(10), j)
+    stamp = datetime.date.today().isoformat()
+    line = f"{chr(10)}- 图纸确认：{stamp}（弧简报卡已过目，G-0.5）"
+    outline.write_text(text[:eol] + line + text[eol:] if eol >= 0 else text + line,
+                       encoding="utf-8", newline=chr(10))
+    return {"ok": True, "confirmed": stamp,
+            "cli": "网页确认 = outline.md 弧块追加「- 图纸确认：日期」"}
 
 
 class ArcCreateIn(BaseModel):

@@ -38,7 +38,7 @@
   <button class="btn ghost" onclick="newProject()">＋ 新建项目</button>
   <button class="btn ghost" id="btn_arc" style="display:none" onclick="newArc()">开新弧</button>
   <label>风格包 <select id="pack" onchange="loadPresets()"></select></label>
-  <label>章节号 <input id="chapter_no" type="number" value="1" style="width:80px"></label>
+  <label>章节号 <input id="chapter_no" type="number" value="1" style="width:80px" onchange="loadG0()"></label>
   <label>章节题 <input id="title" style="width:200px" placeholder="如 尸潮前夜"></label>
   <label>关键词（顿号分隔）<input id="keywords" style="width:240px" placeholder="人物/物件/本章涉及"></label>
   <label>字数挡位 <select id="char_tier" onchange="tierChange()">
@@ -54,6 +54,8 @@
 </div>
 
 <div id="assembly" class="panel" style="display:none"></div>
+
+<div id="step_g0" class="panel" style="display:none"></div>
 
 <div id="step_outline" style="display:none">
 <h2>第一级 · 立意确认</h2>
@@ -111,7 +113,8 @@
 const S = { assembly: null, session_id: '', chosen: null, beats: [],
             drafts: [], lastOptions: null, stage: -1, modelLabel: '-',
             slots: [], activeSlot: null, packVersions: {},
-            batchNo: 0, batchStart: 0, projects: [] };
+            batchNo: 0, batchStart: 0, projects: [],
+            g0: null, g0info: null, g0Skip: false };
 const STAGES = ['装配', '立意', '拍子', '生成', '门禁', '交付'];
 const $ = id => document.getElementById(id);
 const esc = s => (s || '').replace(/</g, '&lt;').replace(/"/g, '&quot;');
@@ -264,12 +267,15 @@ async function switchProject() {
   S.activeSlot = null;
   syncArcBtn();
   $('title').value = ''; $('keywords').value = '';  // 新项目新章节：清残留
+  $('step_g0').style.display = 'none';
+  S.g0info = null; S.g0 = null; S.g0Skip = false;
   await loadPresets(); await loadSlots();
   try {  // 章节号推荐：manuscript 最大 +1（防错乱致锚定失效）
     const n = await (await fetch('/app/api/next_chapter?project='
       + encodeURIComponent($('project').value))).json();
     if (n.next) $('chapter_no').value = n.next;
   } catch (e) {}
+  await loadG0();
 }
 async function loadSlots() {
   try {
@@ -389,6 +395,7 @@ async function loadSlot(i) {
   if (s.pack_version && curV && curV !== s.pack_version)
     $('gen_out').textContent = `⚠ 包已从 v${s.pack_version} 升到 v${curV}，装配内容可能随包更新变化`;
   renderSlots();
+  await loadG0();  // 槽随项目/章节走：G0 简报与图纸门同步刷新
 }
 async function loadPresets() {
   try {
@@ -406,28 +413,101 @@ async function doAssemble() {
     target_chars: targetChars() };
   S.assembly = await post('/app/api/assemble', S.req);
   renderAssembly();
+  await loadG0();
   $('step_outline').style.display = '';
   setStage(0);
   $('options').innerHTML = '<p class="meta">点「生成候选」让写作模型按 thought.md 立意动作提 2–3 个方向。</p><button class="btn" onclick="doOutline()">生成候选</button>';
   captureSlot();  // 装配成功自动入槽（同配置复用原槽）
+}
+// ---- G0 写前简报（v0.11.1 B-1，长篇模式）----
+const G0_FIELDS = [['anchor', '原作锚点'], ['hero_state', '主角状态'],
+  ['arc_pos', '弧线位置'], ['foreshadow', '伏笔动作'], ['quirks', '出场口癖'],
+  ['ending_hook', '结尾钩子'], ['bridge', '衔接上一章']];
+async function loadG0() {
+  S.g0 = null; S.g0info = null; S.g0Skip = false;
+  $('step_g0').style.display = 'none';
+  if (!$('project').value) return;
+  try {
+    const d = await (await fetch('/app/api/longform/g0?project='
+      + encodeURIComponent($('project').value)
+      + '&chapter_no=' + (+$('chapter_no').value || 0))).json();
+    if (!d.longform) return;
+    S.g0info = d; S.g0 = { ...(d.brief || {}) };
+    renderG0();
+  } catch (e) {}
+}
+function g0Ready() {
+  if (!S.g0info) return true;   // 轻量项目/未开弧：不受 G0 管（回归零变化）
+  if (S.g0Skip) return true;    // 显式跳过（交付留痕）
+  if (S.g0info.arc && !S.g0info.arc_confirmed) return false;  // 图纸门 G-0.5
+  return G0_FIELDS.every(([k]) => {
+    const el = $('g0_' + k); return el && el.value.trim();
+  });
+}
+function renderG0() {
+  const d = S.g0info;
+  const probeTag = d.probe ? '｜<span style="color:var(--warn)">🎯 探针章</span>' : '';
+  const arcCard = d.arc ? `
+    <div class="panel" style="margin:6px 0">
+      <strong>弧简报卡（G-0.5 图纸门）· 弧${d.arc.no}《${esc(d.arc.title)}》第${d.arc.start}-${d.arc.end}章</strong>${probeTag}
+      <p class="meta">锚点：${esc(d.arc.anchors)}｜张力：${esc(d.arc.tension)}</p>
+      <p class="meta">勾稽点：${esc(d.arc.hooks)}｜章数字数：${esc(d.arc.size)}</p>
+      ${d.numbers_section ? '<pre class="meta" style="white-space:pre-wrap;max-height:130px;overflow:auto">' + esc(d.numbers_section) + '</pre>' : ''}
+      ${d.arc_confirmed
+        ? '<p class="meta" style="color:var(--good)">✓ 图纸已确认（弧前已对照原作过目，留痕于卷纲）</p>'
+        : `<button class="btn" onclick="confirmArc(${d.arc.no})">确认图纸：我已对照原作过目本弧简报卡</button>`}
+    </div>` : '';
+  $('step_g0').innerHTML = `<h3>写前简报 G0（七字段——缺一不生成，预填自弧块/记忆，可改）</h3>${arcCard}
+    ${G0_FIELDS.map(([k, label]) =>
+      `<label>${label}<input id="g0_${k}" style="width:100%" value="${esc((S.g0 || {})[k] || '')}" oninput="g0Input()"></label>`).join('')}
+    <p class="meta"><a href="javascript:void(0)" onclick="skipG0()">跳过 G0（高级用户——将留痕于交付记录）</a>
+    ${d.probe ? '｜<strong>本弧前 2 章为探针章：交付时要求显式验收，探针未过不连跑</strong>' : ''}</p>`;
+  $('step_g0').style.display = '';
+  if (d.arc && !d.arc_confirmed) $('btn_generate').disabled = true;
+}
+function g0Input() {
+  if (!S.g0) return;
+  G0_FIELDS.forEach(([k]) => { const el = $('g0_' + k); if (el) S.g0[k] = el.value; });
+  $('btn_generate').disabled = !g0Ready();
+}
+async function confirmArc(no) {
+  try {
+    await post('/app/api/longform/arc_confirm',
+      { project: $('project').value, arc_no: no });
+    if (S.g0info) S.g0info.arc_confirmed = true;
+    renderG0(); g0Input();
+    toast('图纸确认已留痕（outline.md 弧块）', 'good');
+  } catch (e) { toast(e.message, 'bad'); }
+}
+function skipG0() {
+  if (!confirm('跳过 G0 七字段简报？跳过将留痕于交付记录（防线：简报质量=本章质量上限）。')) return;
+  S.g0Skip = true;
+  $('btn_generate').disabled = !g0Ready();
+}
+function g0Payload() {
+  if (!S.g0info) return {};
+  return S.g0Skip ? { skipped: true } : (S.g0 || {});
 }
 function renderAssembly() {
   const rows = S.assembly.items.map(i =>
     `<tr${i.dropped ? ' style="opacity:.4"' : ''}><td>${i.kind}</td><td>${i.source}</td>
      <td>${i.chars}</td><td>${i.est_tokens}${i.dropped ? '（预算裁掉）' : ''}</td>
      <td style="max-width:340px">${esc(i.excerpt)}</td></tr>`).join('');
+  const pend = S.assembly.pending_memory
+    ? `<p class="meta" style="color:var(--bad)">⚠ 隔离区有 ${S.assembly.pending_memory} 条未合并记忆登记——建议先在下方「记忆·隔离区」合并再开工（state drift 防线：旧状态会污染下一章前情）</p>` : '';
   $('assembly').style.display = '';
   $('assembly').innerHTML = `<h3>装配预览（所见即所发）</h3>
     <table><thead><tr><th>类型</th><th>来源</th><th>字数</th><th>token 估算</th><th>摘录</th></tr></thead>
     <tbody>${rows}</tbody></table>
     <p class="meta">合计 ${S.assembly.total_chars} 字 ≈ ${S.assembly.total_est_tokens} token / 预算 ${S.assembly.budget_tokens}
-    ${S.assembly.within_budget ? '✓ 预算内' : '⚠ 超预算（记忆项已裁）'}｜目标正文 ≈ ${targetChars() || '未设'} 字</p>`;
+    ${S.assembly.within_budget ? '✓ 预算内' : '⚠ 超预算（记忆项已裁）'}｜目标正文 ≈ ${targetChars() || '未设'} 字</p>${pend}`;
 }
 async function doOutline() {
   $('options').innerHTML = '<p class="meta">模型生成中……</p>';
   try {
     const d = await post('/app/api/outline', {...S.req, title: $('title').value,
-      user_notes: '', target_chars: targetChars(), session_id: S.session_id });
+      user_notes: '', target_chars: targetChars(), session_id: S.session_id,
+      g0: g0Payload() });
     S.session_id = d.session_id; S.lastOptions = d;
     const rec = d.recommended || 0;
     $('options').innerHTML = (d.options || []).map((o, i) =>
@@ -455,7 +535,8 @@ async function doBeats() {
   $('beats').innerHTML = '<p class="meta">模型生成中……</p>';
   try {
     const d = await post('/app/api/beats', {...S.req, title: $('title').value,
-      chosen: S.chosen, target_chars: targetChars(), session_id: S.session_id });
+      chosen: S.chosen, target_chars: targetChars(), session_id: S.session_id,
+      g0: g0Payload() });
     S.session_id = d.session_id; S.beats = d.beats || [];
     renderBeats(d.tone_note || '不指定', d.canon_anchor || '无');
   } catch (e) {
@@ -469,8 +550,12 @@ function renderBeats(tone, anchor) {
      <textarea rows="2" style="margin-top:6px;width:100%" oninput="S.beats[${b.no - 1}].beat = this.value">${esc(b.beat)}</textarea>
      <button class="btn ghost" onclick="reroll(${b.no})">重掷此拍</button></div>`).join('');
   $('tone_note').value = tone; $('canon_anchor').value = anchor;
-  $('btn_generate').disabled = false;
-  $('gen_out').textContent = '拍子就绪，可生成正文。';
+  $('btn_generate').disabled = !g0Ready();
+  if (!g0Ready() && S.g0info)
+    $('gen_out').textContent = S.g0info.arc && !S.g0info.arc_confirmed
+      ? '图纸未确认：先过目弧简报卡并点「确认图纸」'
+      : 'G0 七字段未填全（或点「跳过 G0」留痕）';
+  else $('gen_out').textContent = '拍子就绪，可生成正文。';
   setStage(2);
   slotPatch(S.activeSlot, { beats: S.beats, tone_note: tone, canon_anchor: anchor });
 }
@@ -478,7 +563,7 @@ async function reroll(no) {
   try {
     const d = await post('/app/api/reroll_beat', {...S.req, title: $('title').value,
       chosen: S.chosen, beats: S.beats, index: no,
-      target_chars: targetChars(), session_id: S.session_id });
+      target_chars: targetChars(), session_id: S.session_id, g0: g0Payload() });
     S.beats[no - 1] = d.beat; renderBeats($('tone_note').value, $('canon_anchor').value);
   } catch (e) { toast(e.message, 'bad'); }
 }
@@ -495,7 +580,7 @@ function cardHtml(dr, i) {
     ? `<details><summary class="meta">对比修订前（红=删 绿=增）</summary>${diffHtml(dr.prevText, dr.text)}</details>` : '';
   return `<div class="panel" id="card_${i}"><strong>${dr.label || '稿'}</strong>（${dr.usage.completion_tokens || '?'} tokens）${emptyMark}${trunc}${badge}
     <div class="passage streambox">${(dr.text || '').replace(/</g, '&lt;')}</div>${diffBox}
-    <details><summary class="meta">fp_check / borrow_check / ai_cliche 报告（advisory，不是门）</summary>${gate(dr.fp_check)}${gate(dr.borrow_check)}</details>
+    <details><summary class="meta">fp_check / borrow_check / ai_cliche / numbers_check 报告（advisory，不是门）</summary>${gate(dr.fp_check)}${gate(dr.borrow_check)}${gate(dr.numbers_check)}</details>
     <button class="btn" onclick="reviseDraft(${i})">按报告修订</button>
     <button class="btn ghost" onclick="rewriteFragment(${i})">局部改写</button>
     <button class="btn ghost" onclick="endingCheck(${i})">收尾检查（判官模型）</button>
@@ -562,7 +647,8 @@ async function doGenerate() {
   const body = {...S.req, title: $('title').value, chosen: S.chosen,
     beats: S.beats, tone_note: $('tone_note').value,
     canon_anchor: $('canon_anchor').value, target_chars: targetChars(),
-    n_drafts: +$('n_drafts').value, session_id: S.session_id };
+    n_drafts: +$('n_drafts').value, session_id: S.session_id,
+    g0: g0Payload() };
   try {
     if ($('use_stream').checked) {
       await sse('/app/api/generate_stream', body, onGenEvent);
@@ -613,6 +699,7 @@ function onGenEvent(ev, d) {
     const label = `批${S.batchNo}·稿${d.index + 1}`;
     S.drafts[f] = { text: d.text, usage: d.usage, fp_check: d.fp_check,
                     borrow_check: d.borrow_check, ai_cliche: d.ai_cliche,
+                    numbers_check: d.numbers_check,
                     batch: S.batchNo, label };
     const card = $('card_' + f);
     if (card) card.outerHTML = cardHtml(S.drafts[f], f);
@@ -707,13 +794,20 @@ async function doSave() {
   if (!(d.text || '').trim()) return toast('草稿为空，拒绝交付——请重新生成', 'bad');
   if (!$('title').value.trim() && !confirm('章节题为空，将保存为「未命名」，继续？')) return;
   if (!d.ending && !confirm('【收尾检查】此稿还没跑、或修订后没重跑（思想层硬性条目）。仍要交付？')) return;
+  if (S.g0info && S.g0info.probe && !confirm(
+    '【探针章】本章是本弧前 2 章之一（图纸探针）。请确认已通读并验收本稿——探针未过不连跑。继续交付？')) return;
   const r = await post('/app/api/save', {...S.req, title: $('title').value,
     text: d.text, chosen: S.chosen || {}, beats: S.beats,
     tone_note: $('tone_note').value, canon_anchor: $('canon_anchor').value,
     checks: { fp_check: d.fp_check, borrow_check: d.borrow_check,
               ending: d.ending || null },
-    usage: d.usage, target_chars: targetChars(), session_id: S.session_id });
-  $('save_out').innerHTML = `已交付 ✓ ${r.manuscript}｜会话已存 sessions/（可复判）`
+    usage: d.usage, target_chars: targetChars(), session_id: S.session_id,
+    g0: g0Payload() });
+  const nums = r.numbers_check;
+  const numLine = nums
+    ? `｜数字对照：<span style="color:${nums.exit_code === 0 ? 'var(--good)' : 'var(--bad)'}">${nums.exit_code === 0 ? '✓ 无表外项' : '⚠ 有发现项（落账/豁免/改文，详见交付记录）'}</span>`
+    : '';
+  $('save_out').innerHTML = `已交付 ✓ ${r.manuscript}｜会话已存 sessions/（可复判）${numLine}`
     + (r.session_totals && r.session_totals.tokens
       ? `｜本章累计 ${Math.round(r.session_totals.tokens / 1000)}k tokens / ${r.session_totals.calls} 次调用`
       : '');

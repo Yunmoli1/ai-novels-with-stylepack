@@ -1084,6 +1084,125 @@ class TestWebServer(unittest.TestCase):
                                     "path": "00_项目宪法.md"})
         self.assertEqual(g.status_code, 200)
 
+    def test_longform_g0_numbers_and_probe(self):
+        """v0.11.1 阶段 B：G0 简报端点（弧定位/探针章/图纸确认/衔接默认值）+
+        硬数字表当前弧节进装配 + pending_memory + 交付 G0 留痕与数字对照 +
+        轻量项目零变化。"""
+        self.client.post("/app/api/projects/create", json={
+            "name": "简报表", "mode": "longform"})
+        self.client.post("/app/api/longform/arc_create", json={
+            "project": "简报表", "title": "弧甲", "start": 3, "end": 12,
+            "anchors": "锚点P", "tension": "张力Q", "hooks": "勾稽R",
+            "numbers": [{"name": "旧案人数", "value": "总队39"},
+                        {"name": "敲声", "value": "每夜三下"}]})
+        # 弧外章节：longform 但无弧（不受 G0 门管）
+        out = self.client.get("/app/api/longform/g0",
+                              params={"project": "简报表",
+                                      "chapter_no": 1}).json()
+        self.assertTrue(out["longform"])
+        self.assertIsNone(out["arc"])
+        # 弧内：弧定位 + 探针章（前 2 章）+ 简报预填 + 数字表节
+        g3 = self.client.get("/app/api/longform/g0",
+                             params={"project": "简报表",
+                                     "chapter_no": 3}).json()
+        self.assertEqual(g3["arc"]["no"], 1)
+        self.assertTrue(g3["probe"])
+        self.assertIn("锚点P", g3["brief"]["anchor"])
+        self.assertIn("1/10", g3["brief"]["arc_pos"])
+        self.assertIn("旧案人数", g3["numbers_section"])
+        self.assertFalse(g3["arc_confirmed"])
+        g5 = self.client.get("/app/api/longform/g0",
+                             params={"project": "简报表",
+                                     "chapter_no": 5}).json()
+        self.assertFalse(g5["probe"])
+        self.assertIn("3/10", g5["brief"]["arc_pos"])
+        # 图纸确认（G-0.5）：留痕 outline + 状态翻转
+        c = self.client.post("/app/api/longform/arc_confirm", json={
+            "project": "简报表", "arc_no": 1})
+        self.assertEqual(c.status_code, 200)
+        outline = (Path(self.tmp.name) / "ws" / "简报表"
+                   / "outline.md").read_text(encoding="utf-8")
+        self.assertIn("图纸确认", outline)
+        g5b = self.client.get("/app/api/longform/g0",
+                              params={"project": "简报表",
+                                      "chapter_no": 5}).json()
+        self.assertTrue(g5b["arc_confirmed"])
+        # 硬数字表当前弧节进装配 + pending_memory 字段在场
+        a = self.client.post("/app/api/assemble", json={
+            "project": "简报表", "pack": "luxun", "chapter_no": 5,
+            "keywords": []}).json()
+        self.assertIn("规范·硬数字表", [i["kind"] for i in a["items"]])
+        self.assertIn("pending_memory", a)
+        # 轻量项目：G0 端点 longform=False（表单不出现——回归零变化）
+        self.client.post("/app/api/projects/create", json={"name": "简报轻"})
+        lw = self.client.get("/app/api/longform/g0",
+                             params={"project": "简报轻",
+                                     "chapter_no": 1}).json()
+        self.assertFalse(lw["longform"])
+        # 交付：G0 留痕 + 交付即数字对照（长篇；报不拦）
+        sv = self.client.post("/app/api/save", json={
+            "project": "简报表", "pack": "luxun", "chapter_no": 5,
+            "title": "数字章", "text": "总队三十九人到场。远处亮起一千五百盏灯。",
+            "checks": {}, "usage": {},
+            "g0": {"anchor": "锚点P", "hero_state": "待命", "arc_pos": "3/10",
+                   "foreshadow": "无", "quirks": "无", "ending_hook": "灯下有人",
+                   "bridge": "上章钩子"}})
+        self.assertEqual(sv.status_code, 200)
+        self.assertIn("numbers_check", sv.json())
+        self.assertIn("表外", sv.json()["numbers_check"]["report"])
+        sess = sorted((Path(self.tmp.name) / "ws" / "简报表"
+                       / "sessions").glob("*.json"))
+        rec = json.loads(sess[-1].read_text(encoding="utf-8"))
+        self.assertEqual(rec["g0"]["ending_hook"], "灯下有人")
+        self.assertIn("numbers_check", rec["checks"])
+
+    def test_numbers_check_script(self):
+        """v0.11.1 B-3：数字对照脚本三分类（口径缺失/表外分级/豁免/约略）+
+        --all 回扫 + 中文数字解析单元。"""
+        import subprocess
+        nck = __import__("numbers_check")
+        for raw, want in [("一万二", 12000), ("三千五", 3500), ("二十五", 25),
+                          ("三千五百零六", 3506), ("一万两千五百", 12500),
+                          ("三十九", 39), ("两百", 200), ("十", 10), ("五", 5)]:
+            self.assertEqual(nck.zh_to_int(raw), want, raw)
+        ws = Path(self.tmp.name) / "ws" / "数字账"
+        (ws / "bible").mkdir(parents=True, exist_ok=True)
+        (ws / "manuscript").mkdir(exist_ok=True)
+        ledger = ws / "bible" / "硬数字表.md"
+        ledger.write_text(
+            "# 硬数字表\n\n## 弧1《甲》（第1-10章）\n\n| 账目 | 口径 |\n|---|---|\n"
+            "| 旧案人数 | 总队39 |\n| 敲声 | 每夜三下 |\n\n## 豁免数字\n- 666\n",
+            encoding="utf-8", newline="\n")
+        good = ws / "manuscript" / "001-甲.md"
+        good.write_text("总队39人到场。每夜三下，敲了约39下。旧档案编号666。\n"
+                        "他又数了十几遍，直到月上中天。\n",
+                        encoding="utf-8", newline="\n")
+        r = subprocess.run([sys.executable, str(S / "scripts" / "numbers_check.py"),
+                            str(good), "--ledger", str(ledger), "--chapter", "1"],
+                           capture_output=True, encoding="utf-8")
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 0, out)
+        self.assertNotIn("口径缺失", out) and self.assertNotIn("表外", out)
+        bad = ws / "manuscript" / "002-乙.md"
+        bad.write_text("人群围拢。远处亮起一千五百盏灯。\n",
+                       encoding="utf-8", newline="\n")
+        r2 = subprocess.run([sys.executable, str(S / "scripts" / "numbers_check.py"),
+                             str(bad), "--ledger", str(ledger), "--chapter", "1"],
+                            capture_output=True, encoding="utf-8")
+        out2 = r2.stdout + r2.stderr
+        self.assertEqual(r2.returncode, 1, out2)
+        self.assertIn("口径缺失", out2)          # 39 未出现
+        self.assertIn("表外·设定级候选", out2)   # 1500 ≥100
+        self.assertNotIn("666", out2)            # 豁免清单生效
+        # --all 回扫（retroscan 模式）
+        r3 = subprocess.run([sys.executable, str(S / "scripts" / "numbers_check.py"),
+                             str(ws), "--ledger", str(ledger), "--all"],
+                            capture_output=True, encoding="utf-8")
+        out3 = r3.stdout + r3.stderr
+        self.assertEqual(r3.returncode, 1, out3)
+        self.assertIn("001-甲.md", out3) and self.assertIn("002-乙.md", out3)
+        self.assertIn("2 章", out3)
+
     def test_unconfigured_route_fails_clean(self):
         cfg = appstate.load_config(self.cfg_path)
         cfg["routing"]["write"] = None

@@ -101,6 +101,25 @@ def _chapter_num(stem: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+_NUM_SEC = re.compile(r"^## 弧(\d+)《.+?》（第(\d+)-(\d+)章）", re.M)
+
+
+def numbers_section(project_dir: Path, chapter_no: int) -> str:
+    """硬数字表当前弧节（v0.11.1 B-2）：返回覆盖 chapter_no 的弧节原文；
+    无表/无覆盖弧返回空串（轻量项目与未开弧状态零变化）。
+    规范层附件——调用方不得裁剪（trimmable=False）。"""
+    p = project_dir / "bible" / "硬数字表.md"
+    if not p.is_file():
+        return ""
+    text = splib.read_text(p)[0]
+    secs = list(_NUM_SEC.finditer(text))
+    for i, m in enumerate(secs):
+        if int(m.group(2)) <= chapter_no <= int(m.group(3)):
+            end = secs[i + 1].start() if i + 1 < len(secs) else len(text)
+            return text[m.start():end].strip()
+    return ""
+
+
 def assemble(project_dir: Path, pack_dir: Path, chapter_no: int,
              keywords: list[str] | None = None,
              budget_tokens: int = 24000) -> dict:
@@ -147,6 +166,14 @@ def assemble(project_dir: Path, pack_dir: Path, chapter_no: int,
         except (json.JSONDecodeError, OSError):
             pass
 
+    # 规范·硬数字表（v0.11.1 B-2）：当前弧节数字口径进装配——
+    # 正文只准引用表内口径，不得自造（规范层附件，不参与预算裁剪）
+    num_sec = numbers_section(project_dir, chapter_no)
+    if num_sec:
+        items.append({"kind": "规范·硬数字表", "source": "bible/硬数字表.md",
+                      "text": num_sec + "\n（唯一口径：只准引用，不得自造）",
+                      "trimmable": False})
+
     ms = project_dir / "manuscript"
     if ms.is_dir():
         prev = [f for f in ms.glob("*.md")
@@ -189,6 +216,7 @@ def assemble(project_dir: Path, pack_dir: Path, chapter_no: int,
 
     # 记忆·前情提要（v0.9.0）：MCP 同源 Store 的 recap——最近章摘要+未回收伏笔。
     # 无 db / 空库（新项目、未走记忆登记）静默跳过，装配行为不变。
+    pending_memory = 0  # v0.11.1 B-4：隔离区未合并计数（state drift 防线信号）
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
         from store import Store  # noqa: E402 —— 延迟导入，无 server/ 时跳过
@@ -197,6 +225,7 @@ def assemble(project_dir: Path, pack_dir: Path, chapter_no: int,
             recap = store.recap(3)
         finally:
             store.close()
+        pending_memory = int(recap.get("pending_count") or 0)
         if recap.get("recent") or recap.get("open_foreshadow"):
             lines = [f"第{r['chapter']}章摘要：{r['digest']}"
                      for r in recap["recent"]]
@@ -236,4 +265,5 @@ def assemble(project_dir: Path, pack_dir: Path, chapter_no: int,
             "total_chars": sum(len(i["text"]) for i in items),
             "total_est_tokens": sum(tok(i) for i in items if not i.get("dropped")),
             "budget_tokens": budget_tokens,
-            "within_budget": total <= budget_tokens}
+            "within_budget": total <= budget_tokens,
+            "pending_memory": pending_memory}
