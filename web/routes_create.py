@@ -648,9 +648,17 @@ def do_generate(body: GenerateIn):
                                                    ledger, "--chapter",
                                                    str(body.chapter_no)])
                     if longform else None)
+            nms = (_run_gate("names_check.py", [str(draft_path), "--variants",
+                                                str(project_dir / "bible"
+                                                     / "专名表.tsv"),
+                                                "--characters",
+                                                str(project_dir / "bible"
+                                                    / "characters.md")])
+                   if longform else None)
             drafts.append({"text": result["text"], "usage": result,
                            "fp_check": fp, "borrow_check": borrow,
-                           "ai_cliche": aic, "numbers_check": nums})
+                           "ai_cliche": aic, "numbers_check": nums,
+                           "names_check": nms})
     return {"session_id": sid, "drafts": drafts,
             "assembly_preview": assembly["items"],
             "assembly_tokens": assembly["total_est_tokens"],
@@ -734,9 +742,14 @@ def _stream_one_draft(cfg: dict, sid: str, prompt: str, budget: int,
                                                "--chapter",
                                                str(numbers_ctx["chapter"])])
                 if numbers_ctx else None)
+        nms = (_run_gate("names_check.py", [str(draft_path), "--variants",
+                                            numbers_ctx["variants"],
+                                            "--characters",
+                                            numbers_ctx["characters"]])
+                if numbers_ctx else None)
     yield _sse(done_event, index=index, text=text, usage=usage,
                fp_check=fp, borrow_check=borrow, ai_cliche=aic,
-               numbers_check=nums, **(extra or {}))
+               numbers_check=nums, names_check=nms, **(extra or {}))
 
 
 def _short(exc: Exception, n: int = 120) -> str:
@@ -762,7 +775,11 @@ def do_generate_stream(body: GenerateIn):
             if (prep["project_dir"] / LONGFORM_MARKER).is_file():
                 nctx = {"ledger": str(prep["project_dir"]
                                       / "bible" / "硬数字表.md"),
-                        "chapter": body.chapter_no}
+                        "chapter": body.chapter_no,
+                        "variants": str(prep["project_dir"]
+                                        / "bible" / "专名表.tsv"),
+                        "characters": str(prep["project_dir"]
+                                          / "bible" / "characters.md")}
             yield from _stream_one_draft(cfg, sid, prep["prompt"], prep["budget"],
                                          prep["pack_dir"], i, numbers_ctx=nctx,
                                          route=prep["route"])
@@ -1000,13 +1017,19 @@ def do_save(body: SaveIn):
         gitignore.write_text("*\n!.gitignore\n", encoding="utf-8", newline="\n")
     # v0.11.1 B-1/B-3：G0 留痕 + 交付即数字对照（长篇项目，报不拦）
     checks = dict(body.checks)
-    nums = None
+    nums = nms = None
     if _is_longform(project_dir):
         nums = _run_gate("numbers_check.py",
                          [str(target), "--ledger",
                           str(project_dir / "bible" / "硬数字表.md"),
                           "--chapter", str(body.chapter_no)])
         checks["numbers_check"] = nums
+        nms = _run_gate("names_check.py",
+                        [str(target), "--variants",
+                         str(project_dir / "bible" / "专名表.tsv"),
+                         "--characters",
+                         str(project_dir / "bible" / "characters.md")])
+        checks["names_check"] = nms
     record = {
         "ts": datetime.datetime.now().isoformat(timespec="seconds"),
         "tool": "web-create v0.12.0", "session_id": body.session_id,
@@ -1036,6 +1059,7 @@ def do_save(body: SaveIn):
                          note=f"第{body.chapter_no}章《{title}》")
     return {"ok": True, "manuscript": str(target), "sessions_dir": str(sessions),
             "session_totals": totals, "numbers_check": nums,
+            "names_check": nms,
             "budget": _budget_state(project_dir, body.chapter_no,
                                     body.session_id)}
 
@@ -1050,11 +1074,12 @@ class ProjectCreateIn(BaseModel):
 
 
 BIBLE_TEMPLATES = {
-    "characters.md": "# 人物\n\n## 主角名\n一句话身份。性格：\n口头禅/说话习惯：\n与谁什么关系：\n",
+    "characters.md": "# 人物\n\n## 主角名\n一句话身份。性格：\n口头禅/说话习惯：\n与谁什么关系：\n状态：在场（死亡/离场改：死亡（第N章）/离场（第N章）——names_check 状态门用）\n",
     "world.md": "# 世界设定\n\n## 基本规则\n（力量体系/经济/地理，一段一条）\n",
     "names.json": '{"names": []}\n'
                   '# 每个人名：{"name": "主角名", "tier": "core", "aliases": []}\n'
                   "# tier=core 的实体块自动常驻装配（World Info）\n",
+    "专名表.tsv": "# 专名总账（names_check --variants 用）\n# 正名<TAB>禁用变体1|变体2（形近/音近错写由作者养表；# 开头为注释）\n# 例：陈曦\t陈熙|陈稀\n",
     "../outline.md": "# 卷纲\n\n## 卷一 卷名\n\n### 1 第一章题\n概要一两句。\n\n### 2 第二章题\n概要。\n",
 }
 
@@ -1938,6 +1963,45 @@ def longform_batch_plan(project: str, start: int, count: int = 5):
             "write_mass": bool(cfg.get("routing", {}).get("write_mass")),
             "probe_rows": sum(1 for r in rows if r["probe"]),
             "max_ch": max_ch}
+
+
+class BatchReportIn(BaseModel):
+    project: str
+    pack: str
+    start: int
+    end: int
+
+
+@router.post("/longform/batch/report")
+def longform_batch_report(body: BatchReportIn):
+    """批后趋势报告（设想 §七 批后治理）：fp_check --per-file 对本批各章跑
+    指纹偏差曲线，报告归档 整合/趋势报告/（永不覆盖，撞名加序号）。advisory。"""
+    cfg = appstate.load_config()
+    d = _project_dir(cfg, body.project)
+    if not _is_longform(d):
+        raise HTTPException(400, "该项目不是长篇模式")
+    ms = d / "manuscript"
+    files = [str(f) for f in sorted(ms.glob("*.md"))
+             if (n := _chapter_num_local(f.stem))
+             and body.start <= n <= body.end] if ms.is_dir() else []
+    if not files:
+        raise HTTPException(404, f"区间 {body.start}-{body.end} 无章节文件")
+    r = _run_gate("fp_check.py", [str(_pack_dir(body.pack)), *files,
+                                  "--per-file"])
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    out_dir = d / "整合" / "趋势报告"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    f, k = out_dir / f"连跑趋势-{body.start:03d}-{body.end:03d}-{stamp}.md", 2
+    while f.exists():
+        f = out_dir / f"连跑趋势-{body.start:03d}-{body.end:03d}-{stamp}-{k}.md"
+        k += 1
+    head = (f"<!-- 批后趋势 第{body.start}-{body.end}章｜fp_check --per-file｜"
+            f"exit={r['exit_code']}｜{stamp} -->" + chr(10))
+    f.write_text(head + (r["report"] or "").strip() + chr(10),
+                 encoding="utf-8", newline=chr(10))
+    return {"exit_code": r["exit_code"], "report": r["report"],
+            "file": str(f.relative_to(d)),
+            "cli": "网页趋势 = fp_check.py <包> <各章.md> --per-file"}
 
 
 class ArcCreateIn(BaseModel):

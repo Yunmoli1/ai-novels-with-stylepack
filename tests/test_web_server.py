@@ -1431,6 +1431,77 @@ class TestWebServer(unittest.TestCase):
             "/app/api/longform/batch/plan",
             params={"project": "连跑轻", "start": 1, "count": 5}).status_code, 400)
 
+    def test_names_check_and_trend(self):
+        """v0.12.1 欠账补完：names_check 三模态（禁用变体/人物状态门+引号豁免/
+        卡面禁语黄级/零出现向后兼容）+ 交付带 names_check + 批后趋势报告归档。"""
+        import subprocess
+        nck = S / "scripts" / "names_check.py"
+        ws = Path(self.tmp.name) / "ws" / "专名账"
+        (ws / "bible").mkdir(parents=True, exist_ok=True)
+        (ws / "manuscript").mkdir(exist_ok=True)
+        tsv = ws / "bible" / "专名表.tsv"
+        tsv.write_text("# 注释行\n陈曦\t陈熙|陈稀\n", encoding="utf-8", newline="\n")
+        (ws / "bible" / "characters.md").write_text(
+            "## 老王\n车夫。状态：死亡（第3章）\n\n## 阿静\n琴师。禁语：没关系\n",
+            encoding="utf-8", newline="\n")
+        (ws / "bible" / "names.json").write_text(
+            '{"names": [{"name": "老王", "tier": "core", "aliases": ["王老"]},'
+            ' {"name": "孔乙己", "tier": "minor", "aliases": []}]}',
+            encoding="utf-8", newline="\n")
+        args = ["--variants", str(tsv), "--characters",
+                str(ws / "bible" / "characters.md"),
+                "--namesjson", str(ws / "bible" / "names.json")]
+        # 干净稿：正名在场、死者不出现、禁语不出现
+        good = ws / "manuscript" / "001-甲.md"
+        good.write_text("陈曦点头，收起了琴。\n", encoding="utf-8", newline="\n")
+        r = subprocess.run([sys.executable, str(nck), str(good), *args],
+                           capture_output=True, encoding="utf-8",
+                           errors="replace")
+        self.assertEqual(r.returncode, 0, (r.stdout or "") + (r.stderr or ""))
+        # 违规稿：错写 + 死者叙述出现 + 禁语同现
+        bad = ws / "manuscript" / "002-乙.md"
+        bad.write_text("陈熙点头。老王也来了。阿静笑着说：没关系。\n",
+                       encoding="utf-8", newline="\n")
+        r2 = subprocess.run([sys.executable, str(nck), str(bad), *args],
+                            capture_output=True, encoding="utf-8",
+                            errors="replace")
+        out2 = (r2.stdout or "") + (r2.stderr or "")
+        self.assertEqual(r2.returncode, 1, out2)
+        self.assertIn("[专名错写]", out2)
+        self.assertIn("[状态冲突]", out2)
+        self.assertIn("[禁语·黄]", out2)
+        # 引号豁免（J8）：死者只在对话中被提及 → 状态门放行
+        memo = ws / "manuscript" / "003-丙.md"
+        memo.write_text("“老王当年赶车最稳。”他回忆道。\n",
+                        encoding="utf-8", newline="\n")
+        r3 = subprocess.run([sys.executable, str(nck), str(memo), *args],
+                            capture_output=True, encoding="utf-8",
+                            errors="replace")
+        self.assertEqual(r3.returncode, 0, (r3.stdout or "") + (r3.stderr or ""))
+        # 零出现向后兼容（模态①原契约：孔乙己全文未出现 → 1）
+        r4 = subprocess.run([sys.executable, str(nck), str(good),
+                             "--names", str(ws / "bible" / "names.json")],
+                            capture_output=True, encoding="utf-8",
+                            errors="replace")
+        self.assertEqual(r4.returncode, 1)
+        self.assertIn("零出现 2", r4.stdout or "")
+        # Web：长篇交付带 names_check（连跑书有 001 章）
+        sv = self.client.post("/app/api/save", json={
+            "project": "连跑书", "pack": "luxun", "chapter_no": 2,
+            "title": "专名章", "text": "正文。", "checks": {}, "usage": {}})
+        self.assertEqual(sv.status_code, 200)
+        self.assertIn("names_check", sv.json())
+        # 批后趋势报告：归档 + 轻量 400
+        tr = self.client.post("/app/api/longform/batch/report", json={
+            "project": "连跑书", "pack": "luxun", "start": 1, "end": 1})
+        self.assertEqual(tr.status_code, 200)
+        self.assertIn("file", tr.json())
+        self.assertTrue((Path(self.tmp.name) / "ws" / "连跑书" / "整合"
+                         / "趋势报告").is_dir())
+        lw = self.client.post("/app/api/longform/batch/report", json={
+            "project": "连跑轻", "pack": "luxun", "start": 1, "end": 1})
+        self.assertEqual(lw.status_code, 400)
+
     def test_numbers_check_script(self):
         """v0.11.1 B-3：数字对照脚本三分类（口径缺失/表外分级/豁免/约略）+
         --all 回扫 + 中文数字解析单元。"""

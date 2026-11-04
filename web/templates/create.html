@@ -650,6 +650,21 @@ async function saveHandover() {
     toast('交接草稿已落盘项目根', 'good');
   } catch (e) { toast(e.message, 'bad'); }
 }
+async function batchTrend() {
+  const a = prompt('趋势报告起始章：', (S.batchPlanData ? S.batchPlanData.start : '') || $('chapter_no').value);
+  if (!a) return;
+  const b = prompt('结束章：', (S.batchPlanData ? S.batchPlanData.end : '') || a);
+  if (!b) return;
+  try {
+    const r = await post('/app/api/longform/batch/report',
+      { project: $('project').value, pack: $('pack').value,
+        start: +a, end: +b });
+    showArcTool(`批后趋势报告（第${a}-${b}章 fp_check --per-file）`,
+      r.report || '（无输出）',
+      r.exit_code === 0 ? '' : '⚠ 有越界项——对照报告逐章核');
+    $('at_out').textContent = '已归档：' + r.file;
+  } catch (e) { toast(e.message, 'bad'); }
+}
 // ---- 量产连跑（v0.12）：前端循环（J1）+ 每站复用既有执法 + 红即停 ----
 async function batchPlan() {
   const start = prompt('连跑起始章（须为未交付的新章）：', $('chapter_no').value || '1');
@@ -687,6 +702,7 @@ function renderBatchPlan(d) {
     <p class="meta">铁律：门红即停（无自动修订）· 不跨弧末 · 探针/关键章自动摘出 · 预警停等人 · halt 终止 · 黄灯连击×3 停</p>
     <div class="genrow">
       <button class="btn" onclick="batchStart()">开始连跑（${d.rows.filter(r => r.brief.chapter_type !== 'key' && !r.probe).length} 章）</button>
+      <button class="btn ghost" onclick="batchTrend()">批后趋势报告</button>
       <span id="bp_out" class="meta"></span></div>
     <div id="batchlog" class="panel" style="max-height:260px;overflow:auto;white-space:pre-wrap;font-size:12.5px"></div>`;
   $('arctools').scrollIntoView({ behavior: 'smooth' });
@@ -769,6 +785,15 @@ async function batchChapter(row) {
     const nc = dr.numbers_check;
     if (nc && (nc.report || '').includes('表外·设定级候选')) {
       blog('  ⛔ 表外设定级数字——停等人裁决（落账/豁免/改文）'); return false; }
+    const nmc = dr.names_check;
+    if (nmc && nmc.exit_code === 1) {
+      const rep = nmc.report || '';
+      if (rep.includes('[专名错写]') || rep.includes('[状态冲突]')) {
+        blog('  ⛔ 专名总账门红（错写/状态冲突）——红停，见报告裁决');
+        return false;
+      }
+      yellow = true; blog('  🟡 卡面禁语同现——黄级，供人扫');
+    }
     if (len < 2200 || len > tgt * 1.5) {
       blog(`  ⛔ 字数越界：${len} 字（界 2200–${Math.round(tgt * 1.5)}）——红停`); return false; }
     if (nc && nc.exit_code === 1) { yellow = true; blog('  🟡 数字对照有发现项（场景级）'); }
@@ -928,7 +953,7 @@ function cardHtml(dr, i) {
     ? `<details><summary class="meta">对比修订前（红=删 绿=增）</summary>${diffHtml(dr.prevText, dr.text)}</details>` : '';
   return `<div class="panel" id="card_${i}"><strong>${dr.label || '稿'}</strong>（${dr.usage.completion_tokens || '?'} tokens）${emptyMark}${trunc}${badge}
     <div class="passage streambox">${(dr.text || '').replace(/</g, '&lt;')}</div>${diffBox}
-    <details><summary class="meta">fp_check / borrow_check / ai_cliche / numbers_check 报告（advisory，不是门）</summary>${gate(dr.fp_check)}${gate(dr.borrow_check)}${gate(dr.numbers_check)}</details>
+    <details><summary class="meta">fp_check / borrow_check / ai_cliche / numbers_check / names_check 报告（advisory，不是门）</summary>${gate(dr.fp_check)}${gate(dr.borrow_check)}${gate(dr.numbers_check)}${gate(dr.names_check)}</details>
     <button class="btn" onclick="reviseDraft(${i})">按报告修订</button>
     <button class="btn ghost" onclick="rewriteFragment(${i})">局部改写</button>
     <button class="btn ghost" onclick="endingCheck(${i})">收尾检查（判官模型）</button>
@@ -1050,7 +1075,7 @@ function onGenEvent(ev, d) {
     const label = `批${S.batchNo}·稿${d.index + 1}`;
     S.drafts[f] = { text: d.text, usage: d.usage, fp_check: d.fp_check,
                     borrow_check: d.borrow_check, ai_cliche: d.ai_cliche,
-                    numbers_check: d.numbers_check,
+                    numbers_check: d.numbers_check, names_check: d.names_check,
                     batch: S.batchNo, label };
     const card = $('card_' + f);
     if (card) card.outerHTML = cardHtml(S.drafts[f], f);
