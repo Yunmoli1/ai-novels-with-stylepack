@@ -92,6 +92,7 @@
     <button class="btn" id="btn_generate" disabled onclick="doGenerate()">生成正文</button>
     <span id="gen_out" class="meta"></span>
   </div>
+  <div id="budgetbox" class="panel" style="display:none"></div>
   <div id="drafts"></div>
   <div class="panel" id="savebox" style="display:none">
     <label>采用稿 <select id="pick"></select></label>
@@ -411,7 +412,17 @@ async function doAssemble() {
   S.req = { project: $('project').value, pack: $('pack').value,
     chapter_no: +$('chapter_no').value, keywords: keywords(),
     target_chars: targetChars() };
-  S.assembly = await post('/app/api/assemble', S.req);
+  try {
+    S.assembly = await post('/app/api/assemble', S.req);
+  } catch (e) {
+    if (String(e.message).includes('拆账强制')
+        && confirm(e.message + chr10() + chr10() + '显式确认越过？（防线：无拆账不开工——先在网页补交付是正路）')) {
+      S.allowUnbilled = true;
+      S.req.allow_unbilled = true;
+      return doAssemble();
+    }
+    return toast(e.message, 'bad');
+  }
   renderAssembly();
   await loadG0();
   $('step_outline').style.display = '';
@@ -425,6 +436,7 @@ const G0_FIELDS = [['anchor', '原作锚点'], ['hero_state', '主角状态'],
   ['ending_hook', '结尾钩子'], ['bridge', '衔接上一章']];
 async function loadG0() {
   S.g0 = null; S.g0info = null; S.g0Skip = false;
+  S.bstate = null; S.overBudget = false; S.allowUnbilled = false;
   $('step_g0').style.display = 'none';
   if (!$('project').value) return;
   try {
@@ -433,6 +445,7 @@ async function loadG0() {
       + '&chapter_no=' + (+$('chapter_no').value || 0))).json();
     if (!d.longform) return;
     S.g0info = d; S.g0 = { ...(d.brief || {}) };
+    if (!S.g0.chapter_type) S.g0.chapter_type = 'mass';  // C-4：默认量产章
     renderG0();
   } catch (e) {}
 }
@@ -460,6 +473,11 @@ function renderG0() {
   $('step_g0').innerHTML = `<h3>写前简报 G0（七字段——缺一不生成，预填自弧块/记忆，可改）</h3>${arcCard}
     ${G0_FIELDS.map(([k, label]) =>
       `<label>${label}<input id="g0_${k}" style="width:100%" value="${esc((S.g0 || {})[k] || '')}" oninput="g0Input()"></label>`).join('')}
+    ${d.arc ? `<label>章类型（量产走 write_mass 便宜档，关键章走高档写作模型）
+      <select id="g0_ctype" onchange="g0Input()">
+        <option value="mass" ${(S.g0 || {}).chapter_type !== 'key' ? 'selected' : ''}>量产章（默认）</option>
+        <option value="key" ${(S.g0 || {}).chapter_type === 'key' ? 'selected' : ''}>关键章</option>
+      </select></label>` : ''}
     <p class="meta"><a href="javascript:void(0)" onclick="skipG0()">跳过 G0（高级用户——将留痕于交付记录）</a>
     ${d.probe ? '｜<strong>本弧前 2 章为探针章：交付时要求显式验收，探针未过不连跑</strong>' : ''}</p>`;
   $('step_g0').style.display = '';
@@ -468,7 +486,73 @@ function renderG0() {
 function g0Input() {
   if (!S.g0) return;
   G0_FIELDS.forEach(([k]) => { const el = $('g0_' + k); if (el) S.g0[k] = el.value; });
+  const ct = $('g0_ctype'); if (ct) S.g0.chapter_type = ct.value;
   $('btn_generate').disabled = !g0Ready();
+}
+// ---- 预算三态（v0.11.2 C-3）：预警闸/止损闸/三出路 ----
+function budgetBlocked() {
+  if (S.bstate && S.bstate.state === 'halt' && !S.overBudget) {
+    renderBudget();
+    toast('⛔ 止损闸已触发——生成/修订已锁，看预算面板三出路', 'bad');
+    return true;
+  }
+  if (S.bstate && S.bstate.state === 'warning' && !S.overBudget
+      && !confirm(`⚠ 预警闸：本章已烧 ${Math.round(S.bstate.spend / 1000)}k / 预算 ${Math.round(S.bstate.chapter_budget / 1000)}k tokens——继续？`))
+    return true;
+  return false;
+}
+function renderBudget() {
+  const b = S.bstate, box = $('budgetbox');
+  if (!S.g0info || !b) { if (box) box.style.display = 'none'; return; }
+  const k = n => Math.round((n || 0) / 1000);
+  const color = b.state === 'halt' ? 'var(--bad)' : b.state === 'warning' ? 'var(--warn,#c80)' : 'var(--good)';
+  const icon = b.state === 'halt' ? '⛔ 止损闸' : b.state === 'warning' ? '⚠ 预警闸' : '✓';
+  let html = `<h3 style="margin:4px 0">预算·本章钱包</h3>
+    <p class="meta" style="color:${color}">${icon} 本章已烧 ${k(b.spend)}k / 预算 ${k(b.chapter_budget)}k（止损线 ${k(b.halt_line)}k）</p>
+    <p class="meta">拆账：生成 ${k(b.breakdown && b.breakdown.gen)}k · 修订 ${k(b.breakdown && b.breakdown.rev)}k · 其他 ${k(b.breakdown && b.breakdown.other)}k${b.ledger_tokens ? ` · 账本历史 ${k(b.ledger_tokens)}k` : ''}</p>`;
+  if (b.state === 'halt')
+    html += `<div class="genrow"><a class="btn ghost" href="/app/config">换模型（去配置）</a>
+      <button class="btn ghost" onclick="raiseBudget()">调高预算</button>
+      <button class="btn ghost" onclick="giveUpChapter()">放弃本章</button></div>
+      <p class="meta"><a href="javascript:void(0)" onclick="overBudget()">我知道在超支，仍要继续（显式确认，G4 最高指令权）</a></p>`;
+  box.innerHTML = html; box.style.display = '';
+}
+async function raiseBudget() {
+  const b = (S.g0info && S.g0info.budget) || {};
+  const cb = prompt('新单章预算（tokens）：', b.chapter_budget || 150000);
+  if (!cb) return;
+  const ab = prompt('新弧预算（tokens）：', b.arc_budget || 1500000);
+  if (!ab) return;
+  const hm = prompt('止损倍数：', b.halt_multiplier || 2);
+  if (!hm) return;
+  try {
+    const r = await post('/app/api/longform/budget', { project: $('project').value,
+      chapter_budget: +cb, arc_budget: +ab, halt_multiplier: +hm, rev: b.rev || 0 });
+    S.g0info.budget = r;
+    budgetRefresh();
+    toast('预算已调整并落盘 budget.json（rev+1）', 'good');
+  } catch (e) { toast(e.message, 'bad'); }
+}
+function budgetRefresh() {  // 预算调整后按当前消耗重算三态
+  const b = S.bstate; if (!b) return;
+  const nb = (S.g0info && S.g0info.budget) || {};
+  b.chapter_budget = nb.chapter_budget || b.chapter_budget;
+  b.halt_line = Math.round(b.chapter_budget * (nb.halt_multiplier || 2));
+  b.state = b.spend >= b.halt_line ? 'halt' : b.spend >= b.chapter_budget ? 'warning' : 'normal';
+  renderBudget();
+}
+function giveUpChapter() {
+  if (!confirm('放弃本章？草稿从现场清空（方案槽与 sessions 里的旧稿仍在）。')) return;
+  S.bstate = null; S.overBudget = false;
+  $('budgetbox').style.display = 'none';
+  $('drafts').innerHTML = ''; S.drafts = []; S.batchNo = 0; S.batchStart = 0;
+  $('savebox').style.display = 'none';
+  toast('已放弃本章——新会话从装配重来', 'good');
+}
+function overBudget() {
+  if (!confirm('显式确认：我知道本章已超止损线，仍要继续生成/修订（本次会话内有效）。')) return;
+  S.overBudget = true;
+  toast('已解锁本次超支——换模型仍是更便宜的杠杆', 'warn');
 }
 async function confirmArc(no) {
   try {
@@ -507,7 +591,9 @@ async function doOutline() {
   try {
     const d = await post('/app/api/outline', {...S.req, title: $('title').value,
       user_notes: '', target_chars: targetChars(), session_id: S.session_id,
-      g0: g0Payload() });
+      g0: g0Payload(), allow_unbilled: S.allowUnbilled === true,
+      allow_over_budget: S.overBudget === true });
+    if (d.budget) { S.bstate = d.budget; renderBudget(); }
     S.session_id = d.session_id; S.lastOptions = d;
     const rec = d.recommended || 0;
     $('options').innerHTML = (d.options || []).map((o, i) =>
@@ -536,7 +622,9 @@ async function doBeats() {
   try {
     const d = await post('/app/api/beats', {...S.req, title: $('title').value,
       chosen: S.chosen, target_chars: targetChars(), session_id: S.session_id,
-      g0: g0Payload() });
+      g0: g0Payload(), allow_unbilled: S.allowUnbilled === true,
+      allow_over_budget: S.overBudget === true });
+    if (d.budget) { S.bstate = d.budget; renderBudget(); }
     S.session_id = d.session_id; S.beats = d.beats || [];
     renderBeats(d.tone_note || '不指定', d.canon_anchor || '无');
   } catch (e) {
@@ -640,6 +728,7 @@ async function doGenerate() {
   renderDrafts();  // 被挤掉的最旧批卡片同步消失
   S.batchNo += 1;
   S.batchStart = S.drafts.length;
+  if (budgetBlocked()) { S.batchNo -= 1; S.batchStart = S.drafts.length; return; }
   $('btn_generate').disabled = true;
   $('gen_out').textContent = '连接中……';
   $('savebox').style.display = 'none';
@@ -648,13 +737,14 @@ async function doGenerate() {
     beats: S.beats, tone_note: $('tone_note').value,
     canon_anchor: $('canon_anchor').value, target_chars: targetChars(),
     n_drafts: +$('n_drafts').value, session_id: S.session_id,
-    g0: g0Payload() };
+    g0: g0Payload(), allow_over_budget: S.overBudget === true };
   try {
     if ($('use_stream').checked) {
       await sse('/app/api/generate_stream', body, onGenEvent);
     } else {
       const d = await post('/app/api/generate', body);
       S.session_id = d.session_id;
+      if (d.budget) { S.bstate = d.budget; renderBudget(); }
       d.drafts.forEach((dr, k) => {
         const label = `批${S.batchNo}·稿${k + 1}`;
         S.drafts[S.batchStart + k] = { ...dr, batch: S.batchNo, label };
@@ -676,6 +766,7 @@ function pickLatest() {
 function onGenEvent(ev, d) {
   if (ev === 'session') {
     S.session_id = d.session_id; S.modelLabel = d.model || S.modelLabel;
+    if (d.budget) { S.bstate = d.budget; renderBudget(); }
     updateMeta();
   } else if (ev === 'draft_start') {
     const f = S.batchStart + d.index;
@@ -708,6 +799,7 @@ function onGenEvent(ev, d) {
   } else if (ev === 'error') {
     $('gen_out').textContent = '失败：' + d.message;
   } else if (ev === 'all_done') {
+    if (d.budget) { S.bstate = d.budget; renderBudget(); }
     if (!S.drafts.some(x => x && x.batch === S.batchNo)) return;
     const hot = S.drafts.filter(x => x && x.batch === S.batchNo
                                     && x.usage && x.usage.retries >= 2);
@@ -723,11 +815,15 @@ function onGenEvent(ev, d) {
 async function reviseDraft(i) {
   const d = S.drafts[i];
   if (!(d.text || '').trim()) return toast('空稿无需修订——若反复为空多半是思考模型耗尽 max_tokens', 'bad');
+  if (budgetBlocked()) return;
+  if (S.bstate && S.bstate.state === 'warning' && !S.overBudget
+      && !confirm(`⚠ 预警闸：本章已烧 ${Math.round(S.bstate.spend / 1000)}k / 预算 ${Math.round(S.bstate.chapter_budget / 1000)}k tokens——继续修订？`)) return;
   if (!confirm(`按报告修订会重写【${d.label}】的语言层（结构/立意/收尾保留），继续？`)) return;
   const body = {...S.req, title: $('title').value, chosen: S.chosen || {},
     beats: S.beats, text: d.text,
     reports: { fp_check: d.fp_check, borrow_check: d.borrow_check, ending: d.ending || null },
-    revision: d.revision || 0, target_chars: targetChars(), session_id: S.session_id };
+    revision: d.revision || 0, target_chars: targetChars(), session_id: S.session_id,
+    allow_over_budget: S.overBudget === true };
   const card = $('card_' + i);
   if (card) card.innerHTML = `<strong>${d.label}</strong>（修订生成中<span class="meta">……</span>）
     <div class="passage streambox" id="rbox_${i}"></div>`;
@@ -736,13 +832,15 @@ async function reviseDraft(i) {
     S.drafts[i] = { ...S.drafts[i], prevText: oldText, text: r.text, usage: r.usage,
       fp_check: r.fp_check, borrow_check: r.borrow_check, ai_cliche: r.ai_cliche,
       revision: r.revision, ending: null };
+    if (r.budget) { S.bstate = r.budget; renderBudget(); }
     renderDrafts(); setStage(4);
     persistBatches();
   };
   try {
     if ($('use_stream').checked) {
       await sse('/app/api/revise_stream', body, (ev, r) => {
-        if (ev === 'session') S.session_id = r.session_id;
+        if (ev === 'session') { S.session_id = r.session_id;
+          if (r.budget) { S.bstate = r.budget; renderBudget(); } }
         else if (ev === 'delta') appendStream(i, r.text);
         else if (ev === 'replace') replaceStream(i, r.text, r.chars);
         else if (ev === 'status' || ev === 'error') {

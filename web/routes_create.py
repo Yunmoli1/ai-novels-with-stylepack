@@ -37,6 +37,7 @@ STYLEPACKS = ROOT / "stylepacks"
 router = APIRouter(prefix="/app/api")
 
 # 会话 token 护栏的内存账（本地单用户，进程内存即可）
+# v0.11.2 C-3：分桶拆账 gen/rev/other——halt 诊断面板"哪一环节烧的"的数据源
 _sessions: dict[str, dict] = {}
 
 
@@ -103,16 +104,21 @@ def _guard(cfg: dict, session_id: str, est_tokens: int) -> None:
                                  f"> 上限 {limit}（可在模型配置页调整）")
 
 
-def _record_usage(session_id: str, usage: dict) -> None:
-    s = _sessions.setdefault(session_id, {"tokens": 0, "calls": 0})
-    s["tokens"] += usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)
+def _record_usage(session_id: str, usage: dict, kind: str = "other") -> None:
+    s = _sessions.setdefault(session_id, {"tokens": 0, "calls": 0,
+                                          "gen": 0, "rev": 0, "other": 0})
+    t = usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)
+    s["tokens"] += t
     s["calls"] += 1
+    s[kind] = s.get(kind, 0) + t
 
 
 def _session_totals(session_id: str) -> dict:
-    """本章会话累计（所有调用含重试/门禁判官的真实消耗）。"""
+    """本章会话累计（所有调用含重试/门禁判官的真实消耗）+ 分桶拆账。"""
     s = _sessions.get(session_id or "", {})
-    return {"tokens": int(s.get("tokens", 0)), "calls": int(s.get("calls", 0))}
+    return {"tokens": int(s.get("tokens", 0)), "calls": int(s.get("calls", 0)),
+            "gen": int(s.get("gen", 0)), "rev": int(s.get("rev", 0)),
+            "other": int(s.get("other", 0))}
 
 
 def _run_gate(script: str, args: list[str]) -> dict:
@@ -261,6 +267,7 @@ class AssembleIn(BaseModel):
     pack: str
     chapter_no: int
     keywords: list[str] = []
+    allow_unbilled: bool = False  # C-2 拆账强制：显式确认越过
 
 
 @router.get("/presets")
@@ -306,8 +313,10 @@ def presets(project: str = "", pack: str = ""):
 @router.post("/assemble")
 def do_assemble(body: AssembleIn):
     cfg = appstate.load_config()
+    pdir = _project_dir(cfg, body.project)
+    _ledger_gate(pdir, body.chapter_no, body.allow_unbilled)
     result = assemble_mod.assemble(
-        _project_dir(cfg, body.project), _pack_dir(body.pack),
+        pdir, _pack_dir(body.pack),
         body.chapter_no, body.keywords, cfg.get("context_budget_tokens", 24000))
     result.pop("kept_texts", None)  # 预览不外带全文
     return result
@@ -469,6 +478,8 @@ class OutlineIn(BaseModel):
     target_chars: int = 0  # 字数挡位（v0.6.3）：0=未指定
     session_id: str | None = None
     g0: dict = {}  # G0 七字段简报（v0.11.1 B-1；跳过时 {"skipped": true} 留痕）
+    allow_unbilled: bool = False     # C-2 拆账强制：显式确认越过
+    allow_over_budget: bool = False  # C-3 止损闸：显式确认越过（G4 最高指令权）
 
 
 def _session_id(body) -> str:
@@ -476,7 +487,7 @@ def _session_id(body) -> str:
 
 
 def _do_model(cfg: dict, route: str, session_id: str, prompt: str,
-              max_tokens: int, json_mode: bool):
+              max_tokens: int, json_mode: bool, kind: str = "other"):
     base, key, model = _resolve_model(cfg, route)
     _guard(cfg, session_id, int(max_tokens * 1.5))
     try:
@@ -487,7 +498,7 @@ def _do_model(cfg: dict, route: str, session_id: str, prompt: str,
                                    max_tokens=max_tokens)
     except ValueError as exc:  # 已 sanitize，可直接示人
         raise HTTPException(502, str(exc))
-    _record_usage(session_id, result)
+    _record_usage(session_id, result, kind)
     if not result["text"].strip():  # 双保险：chat() 已拦，此处兜底
         raise HTTPException(502, "模型返回空正文（上游未拦住）——请重试或检查模型配置")
     if json_mode:
@@ -503,19 +514,24 @@ def _do_model(cfg: dict, route: str, session_id: str, prompt: str,
 def do_outline(body: OutlineIn):
     cfg = appstate.load_config()
     sid = _session_id(body)
+    pdir = _project_dir(cfg, body.project)
+    _ledger_gate(pdir, body.chapter_no, body.allow_unbilled)
+    bs = _budget_gate(pdir, body.chapter_no, sid, body.allow_over_budget)
     assembly = assemble_mod.assemble(
-        _project_dir(cfg, body.project), _pack_dir(body.pack),
+        pdir, _pack_dir(body.pack),
         body.chapter_no, body.keywords, cfg.get("context_budget_tokens", 24000))
     prompt = creation.outline_prompt(body.chapter_no, body.title, body.keywords,
                                      assembly["kept_texts"], body.user_notes)
     g0t = _g0_text(body.g0)
     if g0t:
         prompt += chr(10) * 2 + g0t
-    result = _do_model(cfg, "write", sid, prompt, 2200, True)
+    result = _do_model(cfg, _write_route(cfg, pdir, body), sid, prompt, 2200,
+                       True, kind="gen")
     return {"session_id": sid, "options": result["json"].get("options", []),
             "recommended": result["json"].get("recommended", 0),
-            "usage": result, "assembly": {k: v for k, v in assembly.items()
-                                          if k != "kept_texts"}}
+            "usage": result, "budget": _budget_state(pdir, body.chapter_no, sid),
+            "assembly": {k: v for k, v in assembly.items()
+                         if k != "kept_texts"}}
 
 
 class BeatsIn(OutlineIn):
@@ -526,20 +542,24 @@ class BeatsIn(OutlineIn):
 def do_beats(body: BeatsIn):
     cfg = appstate.load_config()
     sid = _session_id(body)
+    pdir = _project_dir(cfg, body.project)
+    _ledger_gate(pdir, body.chapter_no, body.allow_unbilled)
+    bs = _budget_gate(pdir, body.chapter_no, sid, body.allow_over_budget)
     assembly = assemble_mod.assemble(
-        _project_dir(cfg, body.project), _pack_dir(body.pack),
+        pdir, _pack_dir(body.pack),
         body.chapter_no, body.keywords, cfg.get("context_budget_tokens", 24000))
     canon_note = ("二创项目：原作锚点必须落到 canon-terms.json 的 must 术语与人物"
-                  if (_project_dir(cfg, body.project) / "canon" / "canon-terms.json").is_file()
-                  else "")
+                  if (pdir / "canon" / "canon-terms.json").is_file() else "")
     prompt = creation.beats_prompt(body.chapter_no, body.title, body.chosen,
                                    assembly["kept_texts"], canon_note,
                                    _clean_target_chars(body.target_chars))
     g0t = _g0_text(body.g0)
     if g0t:
         prompt += chr(10) * 2 + g0t
-    result = _do_model(cfg, "write", sid, prompt, 2400, True)
-    return {"session_id": sid, **result["json"], "usage": result}
+    result = _do_model(cfg, _write_route(cfg, pdir, body), sid, prompt, 2400,
+                       True, kind="gen")
+    return {"session_id": sid, **result["json"], "usage": result,
+            "budget": _budget_state(pdir, body.chapter_no, sid)}
 
 
 class RerollIn(BeatsIn):
@@ -551,8 +571,10 @@ class RerollIn(BeatsIn):
 def do_reroll(body: RerollIn):
     cfg = appstate.load_config()
     sid = _session_id(body)
+    pdir = _project_dir(cfg, body.project)
+    bs = _budget_gate(pdir, body.chapter_no, sid, body.allow_over_budget)
     assembly = assemble_mod.assemble(
-        _project_dir(cfg, body.project), _pack_dir(body.pack),
+        pdir, _pack_dir(body.pack),
         body.chapter_no, body.keywords, cfg.get("context_budget_tokens", 24000))
     prompt = creation.reroll_beat_prompt(body.chapter_no, body.title, body.chosen,
                                          body.beats, body.index,
@@ -561,8 +583,10 @@ def do_reroll(body: RerollIn):
     g0t = _g0_text(body.g0)
     if g0t:
         prompt += chr(10) * 2 + g0t
-    result = _do_model(cfg, "write", sid, prompt, 600, True)
-    return {"session_id": sid, "beat": result["json"], "usage": result}
+    result = _do_model(cfg, _write_route(cfg, pdir, body), sid, prompt, 600,
+                       True, kind="gen")
+    return {"session_id": sid, "beat": result["json"], "usage": result,
+            "budget": _budget_state(pdir, body.chapter_no, sid)}
 
 
 class GenerateIn(BeatsIn):
@@ -577,6 +601,10 @@ def _prep_generate(cfg: dict, body: GenerateIn) -> dict:
     """装配 + 提示词 + 预算：/generate 与 /generate_stream 共用（所见即所发）。"""
     project_dir = _project_dir(cfg, body.project)
     pack_dir = _pack_dir(body.pack)
+    sid = _session_id(body)
+    _ledger_gate(project_dir, body.chapter_no, body.allow_unbilled)
+    bstate = _budget_gate(project_dir, body.chapter_no, sid,
+                          body.allow_over_budget)
     assembly = assemble_mod.assemble(
         project_dir, pack_dir, body.chapter_no, body.keywords,
         cfg.get("context_budget_tokens", 24000))
@@ -589,7 +617,8 @@ def _prep_generate(cfg: dict, body: GenerateIn) -> dict:
     if g0t:
         prompt = prompt + chr(10) * 2 + g0t
     return {"pack_dir": pack_dir, "project_dir": project_dir,
-            "assembly": assembly, "prompt": prompt,
+            "assembly": assembly, "prompt": prompt, "route":
+                _write_route(cfg, project_dir, body), "bstate": bstate,
             "budget": _prose_budget(cfg, target), "target": target}
 
 
@@ -603,10 +632,11 @@ def do_generate(body: GenerateIn):
     project_dir = prep["project_dir"]
     ledger = str(project_dir / "bible" / "硬数字表.md")
     longform = _is_longform(project_dir)
+    route = prep["route"]
     drafts = []
     with tempfile.TemporaryDirectory() as td:
         for i in range(max(1, min(3, body.n_drafts))):
-            result = _do_model(cfg, "write", sid, prompt, budget, False)
+            result = _do_model(cfg, route, sid, prompt, budget, False, kind="gen")
             draft_path = Path(td) / f"d{i}.txt"
             draft_path.write_text(result["text"], encoding="utf-8", newline="\n")
             fp = _run_gate("fp_check.py", [str(pack_dir), str(draft_path)])
@@ -623,7 +653,8 @@ def do_generate(body: GenerateIn):
                            "ai_cliche": aic, "numbers_check": nums})
     return {"session_id": sid, "drafts": drafts,
             "assembly_preview": assembly["items"],
-            "assembly_tokens": assembly["total_est_tokens"]}
+            "assembly_tokens": assembly["total_est_tokens"],
+            "budget": _budget_state(project_dir, body.chapter_no, sid)}
 
 
 # ---- 流式生成（v0.6.4）：SSE 事件流，生成现场侧栏逐字渲染 ----
@@ -636,12 +667,13 @@ def _sse(type_: str, **fields) -> str:
 def _stream_one_draft(cfg: dict, sid: str, prompt: str, budget: int,
                       pack_dir: Path, index: int, done_event: str = "draft_done",
                       extra: dict | None = None,
-                      numbers_ctx: dict | None = None):
+                      numbers_ctx: dict | None = None, route: str = "write"):
     """产出一个稿的事件序列：流式优先；空稿/流式不可用回退非流加倍链（v0.6.2）。
     结尾必发 done_event（成功）或 error（失败）——前端按此收口。
     numbers_ctx（v0.11.1 B-3）：{"ledger": 路径, "chapter": 章号}——长篇项目
-    交付前数字对照（advisory 报不拦），None=轻量项目跳过。"""
-    base, key, model = _resolve_model(cfg, "write")
+    交付前数字对照（advisory 报不拦），None=轻量项目跳过。
+    route（v0.11.2 C-4）：量产章走 write_mass（路由解析在 _prep_generate）。"""
+    base, key, model = _resolve_model(cfg, route)
     messages = [{"role": "system", "content": creation.SYSTEM},
                 {"role": "user", "content": prompt}]
     _guard(cfg, sid, int(budget * 1.5))
@@ -668,7 +700,8 @@ def _stream_one_draft(cfg: dict, sid: str, prompt: str, budget: int,
         why = "输出被截断（finish=length）" if text.strip() else "流式返回空正文"
         yield _sse("status", message=f"{why}——加倍预算回退重试……")
         try:
-            result = _do_model(cfg, "write", sid, prompt, budget * 2, False)
+            result = _do_model(cfg, route, sid, prompt, budget * 2, False,
+                               kind="gen")
         except HTTPException as exc:
             if text.strip():  # 保留截断部分，前端按徽标警告
                 yield _sse("status", message=f"回退失败：{_short(exc)}；"
@@ -686,7 +719,7 @@ def _stream_one_draft(cfg: dict, sid: str, prompt: str, budget: int,
         return
     usage = {**usage, "model": usage.get("model") or model}
     usage.setdefault("finish_reason", finish)  # 截断时前端据此警告
-    _record_usage(sid, usage)
+    _record_usage(sid, usage, "gen")
     yield _sse("status", index=index, message="门禁运行中（fp_check/borrow_check）……")
     with tempfile.TemporaryDirectory() as td:
         draft_path = Path(td) / f"stream{index}.txt"
@@ -721,7 +754,8 @@ def do_generate_stream(body: GenerateIn):
     def gen():
         yield _sse("session", session_id=sid, model=model_label,
                    target_chars=prep["target"],
-                   assembly_tokens=prep["assembly"]["total_est_tokens"])
+                   assembly_tokens=prep["assembly"]["total_est_tokens"],
+                   budget=prep["bstate"])
         for i in range(max(1, min(3, body.n_drafts))):
             yield _sse("draft_start", index=i)
             nctx = None
@@ -730,8 +764,10 @@ def do_generate_stream(body: GenerateIn):
                                       / "bible" / "硬数字表.md"),
                         "chapter": body.chapter_no}
             yield from _stream_one_draft(cfg, sid, prep["prompt"], prep["budget"],
-                                         prep["pack_dir"], i, numbers_ctx=nctx)
-        yield _sse("all_done", assembly_tokens=prep["assembly"]["total_est_tokens"])
+                                         prep["pack_dir"], i, numbers_ctx=nctx,
+                                         route=prep["route"])
+        yield _sse("all_done", assembly_tokens=prep["assembly"]["total_est_tokens"],
+                   budget=_budget_state(prep["project_dir"], body.chapter_no, sid))
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache",
@@ -751,6 +787,7 @@ class ReviseIn(BaseModel):
     revision: int = 0
     target_chars: int = 0
     session_id: str = ""
+    allow_over_budget: bool = False  # C-3 止损闸显式确认
 
 
 def _gate_reports_text(reports: dict) -> str:
@@ -769,6 +806,8 @@ def _gate_reports_text(reports: dict) -> str:
 def _prep_revise(cfg: dict, body: ReviseIn) -> dict:
     project_dir = _project_dir(cfg, body.project)
     pack_dir = _pack_dir(body.pack)
+    bstate = _budget_gate(project_dir, body.chapter_no, _session_id(body),
+                          body.allow_over_budget)
     assembly = assemble_mod.assemble(
         project_dir, pack_dir, body.chapter_no, body.keywords,
         cfg.get("context_budget_tokens", 24000))
@@ -776,7 +815,7 @@ def _prep_revise(cfg: dict, body: ReviseIn) -> dict:
     prompt = creation.revise_prompt(body.chapter_no, body.title, body.beats,
                                     assembly["kept_texts"], body.text,
                                     _gate_reports_text(body.reports), target)
-    return {"pack_dir": pack_dir, "prompt": prompt,
+    return {"pack_dir": pack_dir, "prompt": prompt, "bstate": bstate,
             # ×2：修订要整篇重写（输出≈原文），思考型模型的推理也吃同一预算——
             # 2500 字章在 ×1 下实测推理+正文 >14000 tokens 被截成 1099 字
             "budget": _prose_budget(cfg, target) * 2}
@@ -786,8 +825,10 @@ def _prep_revise(cfg: dict, body: ReviseIn) -> dict:
 def do_revise(body: ReviseIn):
     cfg = appstate.load_config()
     sid = _session_id(body)
+    project_dir = _project_dir(cfg, body.project)
     prep = _prep_revise(cfg, body)
-    result = _do_model(cfg, "write", sid, prep["prompt"], prep["budget"], False)
+    result = _do_model(cfg, "write", sid, prep["prompt"], prep["budget"], False,
+                       kind="rev")
     with tempfile.TemporaryDirectory() as td:
         draft_path = Path(td) / "revised.txt"
         draft_path.write_text(result["text"], encoding="utf-8", newline="\n")
@@ -798,6 +839,7 @@ def do_revise(body: ReviseIn):
                                                "--pack", str(prep["pack_dir"])])
     return {"session_id": sid, "text": result["text"], "usage": result,
             "fp_check": fp, "borrow_check": borrow, "ai_cliche": aic,
+            "budget": _budget_state(project_dir, body.chapter_no, sid),
             "revision": int(body.revision) + 1}
 
 
@@ -808,7 +850,7 @@ def do_revise_stream(body: ReviseIn):
     prep = _prep_revise(cfg, body)
 
     def gen():
-        yield _sse("session", session_id=sid)
+        yield _sse("session", session_id=sid, budget=prep["bstate"])
         yield _sse("status", message="按报告修订生成中……")
         yield from _stream_one_draft(cfg, sid, prep["prompt"], prep["budget"],
                                      prep["pack_dir"], 0, done_event="revised_done",
@@ -842,7 +884,7 @@ def do_rewrite(body: RewriteIn):
                                      body.fragment, body.instruction)
     result = _do_model(cfg, "write", sid, prompt,
                        max(prep["budget"], _prose_budget(
-                           cfg, len(body.text) or 2500) * 2), False)
+                           cfg, len(body.text) or 2500) * 2), False, kind="gen")
     text = result["text"]
     # 改写守护：其余部分应基本保留（差异段落数 >1/3 视为跑偏，退回原稿提示）
     import difflib
@@ -859,7 +901,8 @@ def do_rewrite(body: RewriteIn):
     return {"session_id": sid, "text": text, "usage": result,
             "kept_ratio": round(kept_ratio, 3),
             "kept_warning": kept_ratio < 0.6,
-            "fp_check": fp, "borrow_check": borrow, "ai_cliche": aic}
+            "fp_check": fp, "borrow_check": borrow, "ai_cliche": aic,
+            "budget": _budget_state(prep["project_dir"], body.chapter_no, sid)}
 
 
 class ExportIn(BaseModel):
@@ -966,7 +1009,7 @@ def do_save(body: SaveIn):
         checks["numbers_check"] = nums
     record = {
         "ts": datetime.datetime.now().isoformat(timespec="seconds"),
-        "tool": "web-create v0.11.1", "session_id": body.session_id,
+        "tool": "web-create v0.11.2", "session_id": body.session_id,
         "project": body.project, "pack": body.pack,
         "chapter_no": body.chapter_no, "title": title,
         "keywords": body.keywords,
@@ -1117,6 +1160,16 @@ TPL_OUTLINE_LONGFORM = """# 卷纲
 铁律：（本卷不可违背的约束，逐条列出）
 """
 
+# C-1 预算层默认值（C1 决策：单章 15 万/弧 150 万/止损 ×2——机制不依赖在途
+# 数据，默认值标注"待标定"，medium 档实验落地后校准）
+TPL_BUDGET = {
+    "chapter_budget": 150000,
+    "arc_budget": 1500000,
+    "halt_multiplier": 2.0,
+    "note": "默认值待标定（C1/D7：medium 档实验+硬数字表效力落地后校准）；单位=tokens",
+    "rev": 1,
+}
+
 
 def _longform_skeleton(d: Path) -> list[str]:
     notes = []
@@ -1125,8 +1178,13 @@ def _longform_skeleton(d: Path) -> list[str]:
                           (d / "bible" / "硬数字表.md", TPL_NUMBERS),
                           (d / "outline.md", TPL_OUTLINE_LONGFORM)):
         path_obj.write_text(tpl, encoding="utf-8", newline="\n")
+    budget = d / "style" / "budget.json"
+    budget.write_text(json.dumps(TPL_BUDGET, ensure_ascii=False, indent=2) + "\n",
+                      encoding="utf-8", newline="\n")
     notes.append("长篇骨架：00_写作防线.md（G0-G4 闸门模板）+ 00_项目宪法.md（条款待填）"
                  " + bible/硬数字表.md + 结构化卷纲")
+    notes.append("预算层：style/budget.json（单章 15 万 / 弧 150 万 / 止损 ×2——"
+                 "默认值待标定，C1/D7）")
     return notes
 
 
@@ -1269,7 +1327,7 @@ def longform_g0(project: str, chapter_no: int):
         brief["bridge"] = prev
     return {"longform": True, "arc": arc, "probe": probe,
             "arc_confirmed": bool(arc and _arc_confirmed(otext, arc)),
-            "brief": brief,
+            "brief": brief, "budget": _budget_of(d),
             "numbers_section": assemble_mod.numbers_section(d, chapter_no)}
 
 
@@ -1308,6 +1366,165 @@ def longform_arc_confirm(body: ArcConfirmIn):
                        encoding="utf-8", newline=chr(10))
     return {"ok": True, "confirmed": stamp,
             "cli": "网页确认 = outline.md 弧块追加「- 图纸确认：日期」"}
+
+
+# ---- 成本框架（v0.11.2 阶段 C）：预算层 + 拆账强制 + 三态执法 + 量产路由 ----
+# 设计：工作台v0.11-C成本控制-设计设想.md §四（三层钱包+两道闸）。
+# 定律：agent 成本 = 轮数 × 上下文重发——工作台是单发架构，执法对象是
+# "单章累计"（会话分桶 + 账本本章历史行）。C4：预算存 style/budget.json
+# （文件协议随项目走）；C5：usage 缺失时估算值已入账（v0.6.4），判定不区分。
+
+def _budget_of(project_dir: Path) -> dict | None:
+    """style/budget.json（C4）；文件缺失的长篇项目（0.11.0 老项目）用默认值
+    执法（rev=0 表示尚未落盘）；轻量项目 None=预算层不存在。"""
+    if not _is_longform(project_dir):
+        return None
+    p = project_dir / "style" / "budget.json"
+    if p.is_file():
+        try:
+            b = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(b, dict) and b.get("chapter_budget"):
+                return b
+        except (OSError, ValueError):
+            pass
+    return dict(TPL_BUDGET, rev=0)
+
+
+def _chapter_ledger_tokens(project_dir: Path, chapter_no: int) -> int:
+    """本章在账本里的历史拆账（弃稿重开：上一轮对同章号的交付消耗）。"""
+    cost = project_dir / "style" / "cost.jsonl"
+    total, tag = 0, f"第{chapter_no}章"
+    if cost.is_file():
+        for line in cost.read_text(encoding="utf-8").splitlines():
+            if tag not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            total += int(row.get("session_tokens") or row.get("tokens") or 0)
+    return total
+
+
+def _budget_state(project_dir: Path, chapter_no: int, sid: str) -> dict | None:
+    """预算三态（C-3）：normal / warning(≥单章预算) / halt(≥预算×止损倍数)。
+    spend = 本章会话已烧（含重试/修订分桶）+ 账本本章历史行。"""
+    b = _budget_of(project_dir)
+    if not b:
+        return None
+    s = _sessions.get(sid or "", {})
+    session_t = int(s.get("tokens", 0))
+    ledger_t = _chapter_ledger_tokens(project_dir, chapter_no)
+    spend = session_t + ledger_t
+    line = int(b.get("chapter_budget") or 0)
+    halt = int(line * float(b.get("halt_multiplier") or 2.0))
+    state = "normal"
+    if line and spend >= halt:
+        state = "halt"
+    elif line and spend >= line:
+        state = "warning"
+    return {"state": state, "spend": spend, "chapter_budget": line,
+            "halt_line": halt, "session_tokens": session_t,
+            "ledger_tokens": ledger_t,
+            "breakdown": {"gen": int(s.get("gen", 0)),
+                          "rev": int(s.get("rev", 0)),
+                          "other": int(s.get("other", 0))},
+            "arc_budget": int(b.get("arc_budget") or 0)}
+
+
+def _budget_gate(project_dir: Path, chapter_no: int, sid: str,
+                 allow_over: bool) -> dict | None:
+    """止损闸：halt 且未显式确认 → 429（C2：禁按钮的服务端牙齿；
+    显式确认 allow_over=True 可越——G4 最高指令权，永不真锁死）。"""
+    bs = _budget_state(project_dir, chapter_no, sid)
+    if bs and bs["state"] == "halt" and not allow_over:
+        raise HTTPException(
+            429, f"止损闸：本章已烧 {bs['spend']} / 止损线 {bs['halt_line']}"
+                 f" tokens（单章预算 {bs['chapter_budget']}×止损倍数）——"
+                 "出路：换模型（配置页）/ 调高预算（显式确认）/ 放弃本章")
+    return bs
+
+
+def _ledger_gate(project_dir: Path, chapter_no: int, allow_unbilled: bool) -> None:
+    """拆账强制（C 阶段执法）：开"最新章+1"前，上一章必须有交付拆账记录
+    （web 交付天然落账；CLI/agent 混合工作流会被拦——显式确认可越过，
+    把账本从"可选看"变"必经之路"）。改写旧章不受限。"""
+    if not _is_longform(project_dir):
+        return
+    ms = project_dir / "manuscript"
+    best = 0
+    if ms.is_dir():
+        for f in ms.glob("*.md"):
+            if m := re.match(r"(\d+)", f.stem):
+                best = max(best, int(m.group(1)))
+    if chapter_no != best + 1 or best < 1 or allow_unbilled:
+        return
+    cost = project_dir / "style" / "cost.jsonl"
+    tag = f"第{best}章"
+    if cost.is_file() and tag in cost.read_text(encoding="utf-8"):
+        return
+    raise HTTPException(
+        409, f"拆账强制：第{best}章没有交付拆账记录（style/cost.jsonl 无本章行）"
+             "——先在网页对上一章走一次交付，或显式确认越过（防线：无拆账不开工）")
+
+
+def _write_route(cfg: dict, project_dir: Path, body) -> str:
+    """C-4/C3 量产路由：长篇 + G0 章类型=量产（默认）+ 已配置 write_mass
+    → 量产档；关键章（chapter_type=key）与未配置时回退 write。"""
+    if _is_longform(project_dir):
+        g0 = getattr(body, "g0", None) or {}
+        if g0.get("chapter_type", "mass") != "key" \
+                and cfg.get("routing", {}).get("write_mass"):
+            return "write_mass"
+    return "write"
+
+
+class BudgetIn(BaseModel):
+    project: str
+    chapter_budget: int
+    arc_budget: int
+    halt_multiplier: float
+    rev: int  # 乐观锁（死规矩 #10：预算可被网页与手改两个写入方触达）
+
+
+@router.get("/longform/budget")
+def longform_budget_get(project: str):
+    cfg = appstate.load_config()
+    b = _budget_of(_project_dir(cfg, project))
+    if b is None:
+        raise HTTPException(400, "轻量项目无预算层")
+    return b
+
+
+@router.post("/longform/budget")
+def longform_budget_set(body: BudgetIn):
+    """调高/调整预算（halt 三出路之一，显式确认由前端对话框承担）：
+    rev 乐观锁先行（死规矩 #10，与 /config 同序），旧 rev 409 强制刷新。"""
+    cfg = appstate.load_config()
+    d = _project_dir(cfg, body.project)
+    cur = _budget_of(d) or {}
+    if body.rev != int(cur.get("rev") or 0):
+        return JSONResponse(status_code=409, content={
+            "detail": f"预算已被他处修改（本页 rev={body.rev}，"
+                      f"最新 rev={cur.get('rev')}）——刷新后重试",
+            "budget": cur})
+    if body.chapter_budget < 1:
+        raise HTTPException(400, "单章预算须 ≥1 token")
+    if body.arc_budget < body.chapter_budget:
+        raise HTTPException(400, "弧预算须 ≥ 单章预算")
+    if body.halt_multiplier < 1.0:
+        raise HTTPException(400, "止损倍数须 ≥1.0")
+    data = {"chapter_budget": int(body.chapter_budget),
+            "arc_budget": int(body.arc_budget),
+            "halt_multiplier": float(body.halt_multiplier),
+            "note": str(cur.get("note", "")) or TPL_BUDGET["note"],
+            "rev": int(cur.get("rev") or 0) + 1}
+    (d / "style").mkdir(exist_ok=True)
+    (d / "style" / "budget.json").write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8", newline="\n")
+    return {"ok": True, **data,
+            "cli": "网页改预算 = 编辑 style/budget.json（rev+1）"}
 
 
 class ArcCreateIn(BaseModel):

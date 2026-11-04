@@ -91,6 +91,57 @@ def costs(project: str):
                                      or r.get("tokens") or 0) for r in rows)}
 
 
+@router.get("/board")
+def board(project: str):
+    """长篇看板（v0.11.2 C-5）：弧聚合视图——弧预算占用进度条 + 每章拆账。
+    数据源与 /costs 同源（sessions 记录 + budget.json），不另立账本。"""
+    cfg = appstate.load_config()
+    d = _project(cfg, project)
+    if not _rc._is_longform(d):
+        return {"longform": False}
+    outline = d / "outline.md"
+    arcs = _rc._parse_arcs(outline.read_text(encoding="utf-8")
+                           if outline.is_file() else "")
+    b = _rc._budget_of(d) or {}
+    arc_budget = int(b.get("arc_budget") or 0)
+    halt_mult = float(b.get("halt_multiplier") or 2.0)
+    per: dict[int, dict] = {}
+    sd = d / "sessions"
+    if sd.is_dir():
+        for f in sd.glob("*.json"):
+            try:
+                r = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            n = int(r.get("chapter_no") or 0)
+            if not n:
+                continue
+            t = int((r.get("session_totals") or {}).get("tokens") or 0)
+            if not t:
+                u = r.get("usage") or {}
+                t = int(u.get("prompt_tokens", 0)) + int(u.get("completion_tokens", 0))
+            cur = per.setdefault(n, {"tokens": 0, "title": r.get("title", "")})
+            cur["tokens"] += t
+    out = []
+    for a in arcs:
+        chs, spend = [], 0
+        for n in range(a["start"], a["end"] + 1):
+            if n in per:
+                spend += per[n]["tokens"]
+                chs.append({"chapter_no": n, **per[n]})
+        state = "none"
+        if arc_budget:
+            state = ("halt" if spend >= int(arc_budget * halt_mult)
+                     else "warning" if spend >= arc_budget else "normal")
+        out.append({"no": a["no"], "title": a["title"], "start": a["start"],
+                    "end": a["end"], "spend": spend, "arc_budget": arc_budget,
+                    "state": state,
+                    "chapters": sorted(chs, key=lambda c: c["chapter_no"])})
+    return {"longform": True, "arcs": out,
+            "chapter_budget": int(b.get("chapter_budget") or 0),
+            "arc_budget": arc_budget}
+
+
 class ChapterOpIn(BaseModel):
     project: str
     file: str

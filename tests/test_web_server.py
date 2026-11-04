@@ -1156,6 +1156,122 @@ class TestWebServer(unittest.TestCase):
         self.assertEqual(rec["g0"]["ending_hook"], "灯下有人")
         self.assertIn("numbers_check", rec["checks"])
 
+    def test_longform_budget_config_and_ledger_gate(self):
+        """v0.11.2 C-1/C-2：budget.json 骨架默认 + GET/POST 乐观锁（死规矩 #10）
+        + 拆账强制（409 拦截 / 显式确认越过 / 网页补账后放行）+ 轻量项目无预算层。"""
+        self.client.post("/app/api/projects/create", json={
+            "name": "预算书", "mode": "longform"})
+        ws = Path(self.tmp.name) / "ws" / "预算书"
+        self.assertTrue((ws / "style" / "budget.json").is_file())
+        g = self.client.get("/app/api/longform/budget",
+                            params={"project": "预算书"}).json()
+        self.assertEqual(g["chapter_budget"], 150000)
+        self.assertEqual(g["rev"], 1)
+        bad = self.client.post("/app/api/longform/budget", json={
+            "project": "预算书", "chapter_budget": 100, "arc_budget": 5000,
+            "halt_multiplier": 2.0, "rev": 99})
+        self.assertEqual(bad.status_code, 409)  # 乐观锁
+        ok = self.client.post("/app/api/longform/budget", json={
+            "project": "预算书", "chapter_budget": 100, "arc_budget": 5000,
+            "halt_multiplier": 2.0, "rev": 1})
+        self.assertEqual(ok.status_code, 200)
+        self.assertEqual(ok.json()["rev"], 2)
+        neg = self.client.post("/app/api/longform/budget", json={
+            "project": "预算书", "chapter_budget": 0, "arc_budget": 5000,
+            "halt_multiplier": 2.0, "rev": 2})
+        self.assertEqual(neg.status_code, 400)  # 非法值（rev 匹配后才校验值）
+        # 拆账强制：手放 001 章（无交付拆账记录）→ 开第 2 章 409
+        (ws / "manuscript").mkdir(exist_ok=True)
+        (ws / "manuscript" / "001-手放.md").write_text("手放的上一章。\n",
+                                                       encoding="utf-8")
+        blk = self.client.post("/app/api/assemble", json={
+            "project": "预算书", "pack": "luxun", "chapter_no": 2,
+            "keywords": []})
+        self.assertEqual(blk.status_code, 409)
+        self.assertIn("拆账强制", blk.json()["detail"])
+        bypass = self.client.post("/app/api/assemble", json={
+            "project": "预算书", "pack": "luxun", "chapter_no": 2,
+            "keywords": [], "allow_unbilled": True})
+        self.assertEqual(bypass.status_code, 200)  # 显式确认越过
+        # 网页交付补账（cost.jsonl 落第 1 章行）→ 不带 allow 也放行
+        self.client.post("/app/api/save", json={
+            "project": "预算书", "pack": "luxun", "chapter_no": 1,
+            "title": "补账章", "text": "上一章正文。", "checks": {}, "usage": {}})
+        ok2 = self.client.post("/app/api/assemble", json={
+            "project": "预算书", "pack": "luxun", "chapter_no": 2,
+            "keywords": []})
+        self.assertEqual(ok2.status_code, 200)
+        # 轻量项目无预算层
+        self.client.post("/app/api/projects/create", json={"name": "预算轻"})
+        lw = self.client.get("/app/api/longform/budget",
+                             params={"project": "预算轻"})
+        self.assertEqual(lw.status_code, 400)
+
+    def test_longform_budget_states_and_write_mass(self):
+        """v0.11.2 C-3/C-4：预警→止损 429→显式解锁（G4）；分桶拆账；
+        write_mass 量产路由（量产走 mass 档/关键章走 write）；看板聚合。"""
+        cfg = appstate.load_config(self.cfg_path)
+        cfg["routing"]["write_mass"] = {"provider": "mock", "model": "mock-mass"}
+        appstate.save_config(cfg, self.cfg_path)
+        try:
+            self.client.post("/app/api/projects/create", json={
+                "name": "三态书", "mode": "longform"})
+            self.client.post("/app/api/longform/arc_create", json={
+                "project": "三态书", "title": "弧甲", "start": 1, "end": 10,
+                "anchors": "a", "tension": "b", "hooks": "c"})
+            self.client.post("/app/api/longform/budget", json={
+                "project": "三态书", "chapter_budget": 100, "arc_budget": 5000,
+                "halt_multiplier": 2.0, "rev": 1})
+            g0 = {"anchor": "a", "hero_state": "b", "arc_pos": "c",
+                  "foreshadow": "d", "quirks": "e", "ending_hook": "f",
+                  "bridge": "g", "chapter_type": "mass"}
+            sid = "budget-e2e"
+            base = {"project": "三态书", "pack": "luxun", "chapter_no": 1,
+                    "title": "章", "beats": [], "chosen": {}, "session_id": sid,
+                    "n_drafts": 1}
+            r1 = self.client.post("/app/api/generate", json={**base, "g0": g0})
+            self.assertEqual(r1.status_code, 200)
+            b1 = r1.json()["budget"]
+            self.assertEqual(b1["state"], "warning")  # 150 ≥ 100，< 200
+            self.assertEqual(b1["breakdown"]["gen"], 150)
+            self.assertEqual(LAST["payload"]["model"], "mock-mass")  # 量产路由
+            r2 = self.client.post("/app/api/generate", json={**base, "g0": g0})
+            self.assertEqual(r2.status_code, 200)  # 闸在调用前：本轮 150 < 200 放行
+            self.assertEqual(r2.json()["budget"]["state"], "halt")  # 调后 300 ≥ 200
+            self.assertEqual(r2.json()["budget"]["breakdown"]["gen"], 300)
+            r3 = self.client.post("/app/api/generate", json={**base, "g0": g0})
+            self.assertEqual(r3.status_code, 429)  # 下一轮调用前 300 ≥ 200 → 止损闸
+            self.assertIn("止损闸", r3.json()["detail"])
+            r4 = self.client.post("/app/api/generate", json={
+                **base, "g0": g0, "allow_over_budget": True})
+            self.assertEqual(r4.status_code, 200)  # 显式确认解锁（G4）
+            # 关键章永远走高档写作模型
+            sid2 = "budget-key"
+            self.client.post("/app/api/generate", json={
+                "project": "三态书", "pack": "luxun", "chapter_no": 2,
+                "title": "章", "beats": [], "chosen": {},
+                "session_id": sid2, "n_drafts": 1,
+                "g0": dict(g0, chapter_type="key")})
+            self.assertEqual(LAST["payload"]["model"], "mock-write")
+            # 交付 → 看板弧聚合（session_totals 记账口径）
+            self.client.post("/app/api/save", json={
+                "project": "三态书", "pack": "luxun", "chapter_no": 1,
+                "title": "看板章", "text": "正文。", "checks": {},
+                "usage": {}, "session_id": sid})
+            bd = self.client.get("/app/api/history/board",
+                                 params={"project": "三态书"}).json()
+            self.assertTrue(bd["longform"])
+            self.assertEqual(bd["chapter_budget"], 100)
+            a1 = bd["arcs"][0]
+            self.assertEqual(a1["no"], 1)
+            self.assertGreater(a1["spend"], 0)
+            self.assertEqual(a1["state"], "normal")  # 450 < 5000
+            self.assertEqual(a1["chapters"][0]["chapter_no"], 1)
+        finally:
+            cfg = appstate.load_config(self.cfg_path)
+            cfg["routing"].pop("write_mass", None)
+            appstate.save_config(cfg, self.cfg_path)
+
     def test_numbers_check_script(self):
         """v0.11.1 B-3：数字对照脚本三分类（口径缺失/表外分级/豁免/约略）+
         --all 回扫 + 中文数字解析单元。"""

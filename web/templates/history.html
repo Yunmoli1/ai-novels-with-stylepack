@@ -22,6 +22,9 @@
 <h2>章节</h2>
 <div id="chapters"></div>
 
+<h2>长篇看板（弧预算占用 + 每章拆账）</h2>
+<div class="panel" id="board"><p class="meta">（仅长篇模式项目显示——弧聚合与预算三态）</p></div>
+
 <h2>每章消耗（session_tokens，含重试与判官的真实总账）</h2>
 <div class="panel"><div class="bars" id="costbars"></div>
 <p class="meta">老记录无 session_tokens 字段的按单次调用 tokens 计（v0.6.8 前口径）。</p></div>
@@ -35,7 +38,36 @@ function badge(ok, label) {
   return ok ? `<span class="badge b-ok">${label} ✓</span>` : `<span class="badge b-bad">${label} ✗</span>`;
 }
 async function loadAll() {
-  await loadProjects(); await loadSessions(); await loadCosts();
+  await loadProjects(); await loadSessions(); await loadBoard(); await loadCosts();
+}
+// ---- 长篇看板（v0.11.2 C-5）：弧聚合 + 预算三态进度条 ----
+async function loadBoard() {
+  const p = $('project').value;
+  const box = $('board');
+  try {
+    const d = await api('/app/api/history/board?project=' + encodeURIComponent(p));
+    if (!d.longform || !(d.arcs || []).length) {
+      box.innerHTML = '<p class="meta">（轻量项目或尚未开弧——看板仅长篇模式提供）</p>';
+      return;
+    }
+    const k = n => ((n || 0) / 1000).toFixed(1) + 'k';
+    const st = s => s === 'halt' ? '<span class="badge b-bad">⛔ 超弧止损线</span>'
+      : s === 'warning' ? '<span class="badge" style="background:rgba(230,180,90,.2);color:#a80">⚠ 超弧预算</span>'
+      : '<span class="badge b-ok">✓ 预算内</span>';
+    box.innerHTML = d.arcs.map(a => {
+      const pct = a.arc_budget ? Math.min(100, a.spend / a.arc_budget * 100) : 0;
+      const over = a.arc_budget && a.spend > a.arc_budget * 2 ? 200 : pct;
+      return `<div class="panel"><strong>弧${a.no}《${esc(a.title)}》</strong>
+        <span class="meta">第${a.start}-${a.end}章｜弧累计 ${k(a.spend)} / 预算 ${k(a.arc_budget)} tokens</span> ${st(a.state)}
+        <div class="bars"><div class="brow"><span class="meta">弧预算占用</span>
+          <div style="background:var(--panel2);border-radius:4px;height:18px"><div class="bar" style="width:${Math.max(2, Math.min(100, over / 2))}%"></div></div>
+          <span class="meta">${a.arc_budget ? Math.round(a.spend / a.arc_budget * 100) + '%' : '—'}</span></div></div>
+        ${(a.chapters || []).map(c => `<div class="brow"><span class="meta">第${c.chapter_no}章《${esc(c.title)}》</span>
+          <div class="bar" style="width:${Math.max(2, c.tokens / Math.max(...a.chapters.map(x => x.tokens), 1) * 90)}%;opacity:.5"></div>
+          <span class="meta">${k(c.tokens)}${d.chapter_budget && c.tokens >= d.chapter_budget ? ' ⚠超单章' : ''}</span></div>`).join('') || '<p class="meta">（本弧尚无交付章）</p>'}
+      </div>`;
+    }).join('');
+  } catch (e) { box.innerHTML = '<p class="meta">' + e.message + '</p>'; }
 }
 let projectsLoaded = false;
 async function loadProjects() {
