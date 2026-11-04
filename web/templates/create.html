@@ -39,6 +39,7 @@
   <button class="btn ghost" id="btn_arc" style="display:none" onclick="newArc()">开新弧</button>
   <button class="btn ghost" id="btn_net" style="display:none" onclick="arcNet()">弧末漂移网</button>
   <button class="btn ghost" id="btn_ho" style="display:none" onclick="handoverDoc()">交接汇总</button>
+  <button class="btn ghost" id="btn_batch" style="display:none" onclick="batchPlan()">量产连跑</button>
   <label>风格包 <select id="pack" onchange="loadPresets()"></select></label>
   <label>章节号 <input id="chapter_no" type="number" value="1" style="width:80px" onchange="loadG0()"></label>
   <label>章节题 <input id="title" style="width:200px" placeholder="如 尸潮前夜"></label>
@@ -239,6 +240,7 @@ function syncArcBtn() {
   $('btn_arc').style.display = lf ? '' : 'none';
   $('btn_net').style.display = lf ? '' : 'none';
   $('btn_ho').style.display = lf ? '' : 'none';
+  $('btn_batch').style.display = lf ? '' : 'none';
 }
 async function newArc() {
   const title = prompt('弧名（本弧的张力主题，如：敲门与旧账）：');
@@ -647,6 +649,170 @@ async function saveHandover() {
     $('at_out').textContent = '已落盘：' + r.file;
     toast('交接草稿已落盘项目根', 'good');
   } catch (e) { toast(e.message, 'bad'); }
+}
+// ---- 量产连跑（v0.12）：前端循环（J1）+ 每站复用既有执法 + 红即停 ----
+async function batchPlan() {
+  const start = prompt('连跑起始章（须为未交付的新章）：', $('chapter_no').value || '1');
+  if (!start) return;
+  const count = prompt('连跑章数（1–10，自动截断到弧末）：', '5');
+  if (!count) return;
+  try {
+    const d = await (await fetch('/app/api/longform/batch/plan?project='
+      + encodeURIComponent($('project').value) + '&start=' + (+start)
+      + '&count=' + (+count))).json();
+    S.batchPlanData = d;
+    renderBatchPlan(d);
+  } catch (e) { toast(e.message, 'bad'); }
+}
+function renderBatchPlan(d) {
+  const k = n => Math.round((n || 0) / 1000);
+  const rows = d.rows.map((r, i) => {
+    const key = r.brief.chapter_type === 'key';
+    const tags = (r.probe ? ' <span style="color:var(--warn)">🎯探针（不进连跑）</span>' : '')
+      + (key ? ` <span style="color:var(--bad)">关键章·摘出（${esc(r.key_reason)}）</span>` : '');
+    return `<tr><td>第${r.chapter_no}章</td><td>${esc(r.brief.arc_pos)}</td><td>${tags}</td>
+      <td><input id="bp_title_${i}" value="${esc(r.title)}" style="width:100px"></td>
+      <td><input id="bp_bridge_${i}" value="${esc(r.brief.bridge)}" style="width:140px" placeholder="上章钩子自动链"></td>
+      <td><input id="bp_hook_${i}" style="width:140px" placeholder="本章结尾钩子"></td>
+      <td><input id="bp_kw_${i}" value="${esc((r.keywords || []).join('、'))}" style="width:150px"></td>
+      <td><select id="bp_ct_${i}"><option value="mass" ${!key ? 'selected' : ''}>量产</option><option value="key" ${key ? 'selected' : ''}>关键</option></select></td></tr>`;
+  }).join('');
+  $('arctools').style.display = '';
+  $('arctools').innerHTML = `<h3>量产连跑·章计划表（预审一次 = 冻结 N 章简报）</h3>
+    <p class="meta">预估成本 ≈ ${k(d.estimate_tokens)}k tokens（近 ${d.samples} 章中位数 × ${d.rows.length} 章${d.samples ? '' : '；无历史数据，凭你确认'}）｜
+    量产路由：${d.write_mass ? '✓ write_mass 已配置' : '<span style="color:var(--bad)">未配置——回退 write（若是思考模型贵 6-9 倍，建议先配置）</span>'}
+    ${d.clamped ? '｜⚠ 已按弧末截断' : ''}｜探针章 ${d.probe_rows} 章不进连跑</p>
+    <table><thead><tr><th>章</th><th>弧位</th><th></th><th>题</th><th>衔接（上章钩）</th><th>结尾钩子</th><th>关键词</th><th>类型</th></tr></thead>
+    <tbody>${rows}</tbody></table>
+    <p class="meta">铁律：门红即停（无自动修订）· 不跨弧末 · 探针/关键章自动摘出 · 预警停等人 · halt 终止 · 黄灯连击×3 停</p>
+    <div class="genrow">
+      <button class="btn" onclick="batchStart()">开始连跑（${d.rows.filter(r => r.brief.chapter_type !== 'key' && !r.probe).length} 章）</button>
+      <span id="bp_out" class="meta"></span></div>
+    <div id="batchlog" class="panel" style="max-height:260px;overflow:auto;white-space:pre-wrap;font-size:12.5px"></div>`;
+  $('arctools').scrollIntoView({ behavior: 'smooth' });
+}
+function blog(s) {
+  const el = $('batchlog');
+  if (el) { el.textContent += s + chr10(); el.scrollTop = el.scrollHeight; }
+}
+async function batchStart() {
+  const d = S.batchPlanData;
+  if (!d) return;
+  const rows = d.rows.map((r, i) => ({
+    ...r,
+    title: $('bp_title_' + i).value.trim() || r.title,
+    keywords: $('bp_kw_' + i).value.split(/[、,，]/).map(s => s.trim()).filter(Boolean),
+    brief: { ...r.brief,
+      ending_hook: $('bp_hook_' + i).value.trim(),
+      bridge: $('bp_bridge_' + i).value.trim(),
+      chapter_type: $('bp_ct_' + i).value }
+  }));
+  for (let i = 1; i < rows.length; i++)   // 钩子链：上行结尾钩子 → 下行衔接
+    rows[i].brief.bridge = rows[i - 1].brief.ending_hook;
+  const queue = rows.filter(r => r.brief.chapter_type === 'mass' && !r.probe);
+  if (!queue.length) return toast('没有可连跑的章（全是探针/关键章——先手写验收它们）', 'bad');
+  if (!d.write_mass && !confirm('量产路由 write_mass 未配置——若 write 是思考模型，成本 6-9 倍。仍要开始？')) return;
+  if (!confirm(`冻结 ${queue.length} 章简报并开始连跑？预估 ≈ ${Math.round(d.estimate_tokens / 1000)}k tokens。`)) return;
+  S.batchRun = { queue, stop: false, warnStreak: 0 };
+  $('bp_out').textContent = '连跑中……';
+  for (const row of queue) {
+    if (!(await batchChapter(row))) {
+      blog('⛔ 连跑终止。断点=最后交付章——重开页面从 N+1 重新预审即可续。');
+      $('bp_out').textContent = '已终止';
+      return;
+    }
+  }
+  blog('✅ 批量完成：' + queue.length + ' 章全部交付。建议批后跑一次指纹趋势与隔离区人审。');
+  $('bp_out').textContent = '批量完成。';
+}
+function batchPause() {
+  return new Promise(resolve => {
+    blog('  （等人在场：继续 / 终止）');
+    const bar = document.createElement('div');
+    bar.className = 'genrow';
+    bar.innerHTML = '<button class="btn">继续下一章</button><button class="btn ghost">终止连跑</button>';
+    $('arctools').appendChild(bar);
+    const [yes, no] = bar.querySelectorAll('button');
+    yes.onclick = () => { bar.remove(); resolve(true); };
+    no.onclick = () => { bar.remove(); resolve(false); };
+  });
+}
+async function batchChapter(row) {
+  const n = row.chapter_no;
+  blog(`—— 第${n}章《${row.title}》开始：简报已冻结`);
+  const sid = 'batch-' + n + '-' + (Date.now() % 1000000);
+  const base = { project: $('project').value, pack: $('pack').value,
+    chapter_no: n, title: row.title, keywords: row.keywords,
+    target_chars: targetChars(), session_id: sid };
+  try {
+    blog('  ① 立意（自动取推荐）……');
+    const o = await post('/app/api/outline', { ...base, user_notes: '', g0: row.brief });
+    const chosen = (o.options || [])[o.recommended || 0] || (o.options || [])[0];
+    if (!chosen) { blog('  ⛔ 立意无候选——红停'); return false; }
+    blog('  ② 拍子表……');
+    const b = await post('/app/api/beats', { ...base, chosen, g0: row.brief });
+    const beats = b.beats || [];
+    blog('  ③ 正文生成（单发 1 稿）……');
+    const g = await post('/app/api/generate', { ...base, chosen, beats,
+      tone_note: b.tone_note || '不指定', canon_anchor: b.canon_anchor || '无',
+      n_drafts: 1, g0: row.brief });
+    if (g.budget && g.budget.state === 'halt') { blog('  ⛔ 预算止损线——终止'); return false; }
+    const dr = (g.drafts || [])[0];
+    if (!dr || !(dr.text || '').trim()) { blog('  ⛔ 空稿——红停'); return false; }
+    const len = dr.text.length, tgt = targetChars() || 2500;
+    let yellow = false;
+    const fpX = (dr.fp_check || {}).exit_code, bwX = (dr.borrow_check || {}).exit_code;
+    if ((fpX !== undefined && fpX !== 0) || (bwX !== undefined && bwX !== 0)) {
+      blog(`  ⛔ 门禁红（fp=${fpX}/borrow=${bwX}）——无自动修订，铁律停`); return false; }
+    if ((dr.usage || {}).finish_reason === 'length') {
+      blog('  ⛔ 重试触顶仍截断——红停'); return false; }
+    const nc = dr.numbers_check;
+    if (nc && (nc.report || '').includes('表外·设定级候选')) {
+      blog('  ⛔ 表外设定级数字——停等人裁决（落账/豁免/改文）'); return false; }
+    if (len < 2200 || len > tgt * 1.5) {
+      blog(`  ⛔ 字数越界：${len} 字（界 2200–${Math.round(tgt * 1.5)}）——红停`); return false; }
+    if (nc && nc.exit_code === 1) { yellow = true; blog('  🟡 数字对照有发现项（场景级）'); }
+    if ((dr.ai_cliche || {}).exit_code === 1) { yellow = true; blog('  🟡 AI 腔密度偏高'); }
+    if (Math.abs(len - tgt) / tgt > 0.15) { yellow = true; blog(`  🟡 字数偏差 >15%：${len}/${tgt}`); }
+    blog(`  ④ 交付（${len} 字）……`);
+    const sv = await post('/app/api/save', { ...base, text: dr.text, chosen,
+      beats, tone_note: b.tone_note || '不指定', canon_anchor: b.canon_anchor || '无',
+      checks: { fp_check: dr.fp_check, borrow_check: dr.borrow_check },
+      usage: dr.usage, g0: row.brief });
+    blog('  ⑤ 记忆登记与 digest 校验……');
+    const md = await post('/app/api/memory/delta', { project: base.project,
+      chapter_no: n, title: row.title, text: dr.text, beats, session_id: sid });
+    if (!(md.digest || '').length || md.digest.length < 10) {
+      blog('  ⛔ digest 异常（空/过短）——坏前情会传染，红停'); return false; }
+    const pd = await (await fetch('/app/api/memory/pending?project='
+      + encodeURIComponent(base.project))).json();
+    const riskOf = {};
+    ['high', 'medium', 'low'].forEach(rk =>
+      (pd.groups[rk] || []).forEach(x => { riskOf[x.id] = rk; }));
+    const mine = (md.proposed || []).map(p => p.id).filter(id => riskOf[id]);
+    if (mine.some(id => riskOf[id] !== 'low')) {
+      blog('  ⛔ 中/高风险记忆 delta（正史级变更）——停，隔离区人审'); return false; }
+    const lowIds = mine.filter(id => riskOf[id] === 'low');
+    if (lowIds.length) await post('/app/api/memory/merge',
+      { project: base.project, ids: lowIds, force: false });
+    if (sv.budget) {
+      S.bstate = sv.budget; renderBudget();
+      if (sv.budget.state === 'halt') { blog('  ⛔ 预算止损线——终止'); return false; }
+      if (sv.budget.state === 'warning') {
+        blog(`  ⚠ 预警：本章 ${Math.round(sv.budget.spend / 1000)}k / 预算 ${Math.round(sv.budget.chapter_budget / 1000)}k——连跑暂停`);
+        if (!(await batchPause())) { blog('⏸ 人选择终止。'); return false; }
+        blog('  ▶ 人确认继续。');
+      }
+    }
+    S.batchRun.warnStreak = yellow ? S.batchRun.warnStreak + 1 : 0;
+    if (S.batchRun.warnStreak >= 3) {
+      blog('  ⛔ 黄灯连击 ×3——漂移趋势，停（批后建议跑指纹趋势）'); return false; }
+    blog(`  ✓ 第${n}章 交付完成（${len} 字）`);
+    return true;
+  } catch (e) {
+    blog('  ⛔ 异常：' + e.message + '——红停（断点=最后交付章）');
+    return false;
+  }
 }
 async function confirmArc(no) {
   try {

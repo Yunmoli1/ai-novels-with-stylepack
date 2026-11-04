@@ -1359,6 +1359,78 @@ class TestWebServer(unittest.TestCase):
                              json={"project": "治理轻"})
         self.assertEqual(r.status_code, 400)
 
+    def test_longform_batch_plan(self):
+        """v0.12 量产连跑·规划器：简报自动产出（钩子链/探针/关键章标记/
+        预检数据）+ 边界校验（弧外/已交付/超硬顶）+ 交付带预算态 + 账本
+        session 字段。循环本体在前端（J1），服务端只出计划表。"""
+        self.client.post("/app/api/projects/create", json={
+            "name": "连跑书", "mode": "longform"})
+        self.client.post("/app/api/longform/arc_create", json={
+            "project": "连跑书", "title": "弧甲", "start": 1, "end": 10,
+            "anchors": "锚点甲、锚点乙", "tension": "张力", "hooks": "勾稽"})
+        # 边界：弧外 / 超硬顶
+        self.assertEqual(self.client.get(
+            "/app/api/longform/batch/plan",
+            params={"project": "连跑书", "start": 0, "count": 5}).status_code, 400)
+        self.assertEqual(self.client.get(
+            "/app/api/longform/batch/plan",
+            params={"project": "连跑书", "start": 1, "count": 11}).status_code, 400)
+        # 正常计划：5 行、探针前 2、简报字段齐、预估/路由预检在场
+        p1 = self.client.get("/app/api/longform/batch/plan",
+                             params={"project": "连跑书",
+                                     "start": 1, "count": 5}).json()
+        self.assertEqual([r["chapter_no"] for r in p1["rows"]],
+                         [1, 2, 3, 4, 5])
+        self.assertTrue(p1["rows"][0]["probe"]) and self.assertTrue(p1["rows"][1]["probe"])
+        self.assertFalse(p1["rows"][2]["probe"])
+        self.assertEqual(p1["rows"][0]["brief"]["chapter_type"], "mass")
+        self.assertIn("锚点甲", p1["rows"][0]["brief"]["anchor"])
+        self.assertIn("弧1《弧甲》", p1["rows"][0]["brief"]["arc_pos"])
+        self.assertEqual(p1["estimate_tokens"], 0)
+        self.assertFalse(p1["write_mass"])
+        # 已交付章不可作起点
+        ws = Path(self.tmp.name) / "ws" / "连跑书"
+        (ws / "manuscript").mkdir(exist_ok=True)
+        (ws / "manuscript" / "001-在先.md").write_text("已有章。\n",
+                                                       encoding="utf-8")
+        self.assertEqual(self.client.get(
+            "/app/api/longform/batch/plan",
+            params={"project": "连跑书", "start": 1, "count": 5}).status_code, 400)
+        # 交付带预算态 + 账本 session 字段 + 钩子链跨行
+        sv = self.client.post("/app/api/save", json={
+            "project": "连跑书", "pack": "luxun", "chapter_no": 1,
+            "title": "链头", "text": "正文若干。", "checks": {}, "usage": {},
+            "session_id": "bp-s1",
+            "g0": {"anchor": "a", "hero_state": "b", "arc_pos": "c",
+                   "foreshadow": "d", "quirks": "e",
+                   "ending_hook": "门外有脚步", "bridge": "g"}})
+        self.assertEqual(sv.status_code, 200)
+        self.assertIn("budget", sv.json())
+        cost = (ws / "style" / "cost.jsonl").read_text(encoding="utf-8")
+        self.assertIn('"session"', cost)
+        p2 = self.client.get("/app/api/longform/batch/plan",
+                             params={"project": "连跑书",
+                                     "start": 2, "count": 3}).json()
+        self.assertEqual(p2["rows"][0]["chapter_no"], 2)
+        self.assertTrue(p2["rows"][0]["probe"])  # 章 2 仍是探针（前 2 章）
+        # 服务端把前章真实钩子接到批内第一章；后续行由前端钩子链（人工填钩子）接续
+        self.assertEqual(p2["rows"][0]["brief"]["bridge"], "门外有脚步")
+        self.assertEqual(p2["rows"][1]["brief"]["bridge"], "")
+        self.assertFalse(p2["rows"][1]["probe"])
+        # 弧末自动标关键章（J4）
+        p3 = self.client.get("/app/api/longform/batch/plan",
+                             params={"project": "连跑书",
+                                     "start": 9, "count": 5}).json()
+        self.assertTrue(p3["clamped"])  # 9-10 被弧末截断
+        self.assertEqual([r["chapter_no"] for r in p3["rows"]], [9, 10])
+        self.assertEqual(p3["rows"][1]["brief"]["chapter_type"], "key")
+        self.assertEqual(p3["rows"][1]["key_reason"], "弧末章")
+        # 轻量项目拒绝
+        self.client.post("/app/api/projects/create", json={"name": "连跑轻"})
+        self.assertEqual(self.client.get(
+            "/app/api/longform/batch/plan",
+            params={"project": "连跑轻", "start": 1, "count": 5}).status_code, 400)
+
     def test_numbers_check_script(self):
         """v0.11.1 B-3：数字对照脚本三分类（口径缺失/表外分级/豁免/约略）+
         --all 回扫 + 中文数字解析单元。"""

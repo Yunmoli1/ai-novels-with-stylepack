@@ -1009,7 +1009,7 @@ def do_save(body: SaveIn):
         checks["numbers_check"] = nums
     record = {
         "ts": datetime.datetime.now().isoformat(timespec="seconds"),
-        "tool": "web-create v0.11.3", "session_id": body.session_id,
+        "tool": "web-create v0.12.0", "session_id": body.session_id,
         "project": body.project, "pack": body.pack,
         "chapter_no": body.chapter_no, "title": title,
         "keywords": body.keywords,
@@ -1032,9 +1032,12 @@ def do_save(body: SaveIn):
                                  + body.usage.get("completion_tokens", 0)),
                          session_tokens=totals["tokens"],
                          session_calls=totals["calls"],
+                         session_id=body.session_id,
                          note=f"第{body.chapter_no}章《{title}》")
     return {"ok": True, "manuscript": str(target), "sessions_dir": str(sessions),
-            "session_totals": totals, "numbers_check": nums}
+            "session_totals": totals, "numbers_check": nums,
+            "budget": _budget_state(project_dir, body.chapter_no,
+                                    body.session_id)}
 
 
 # ---- 新建项目（v0.10.0：不开 agent 的用户从这里开始第一本书）----
@@ -1393,8 +1396,11 @@ def _budget_of(project_dir: Path) -> dict | None:
     return dict(TPL_BUDGET, rev=0)
 
 
-def _chapter_ledger_tokens(project_dir: Path, chapter_no: int) -> int:
-    """本章在账本里的历史拆账（弃稿重开：上一轮对同章号的交付消耗）。"""
+def _chapter_ledger_tokens(project_dir: Path, chapter_no: int,
+                           exclude_sid: str = "") -> int:
+    """本章在账本里的历史拆账（弃稿重开：上一轮对同章号的交付消耗）。
+    exclude_sid：排除当前会话自己的行（v0.12 起账本行带 session 字段——
+    否则交付后 spend 双算，会提前误触闸）。"""
     cost = project_dir / "style" / "cost.jsonl"
     total, tag = 0, f"第{chapter_no}章"
     if cost.is_file():
@@ -1405,19 +1411,21 @@ def _chapter_ledger_tokens(project_dir: Path, chapter_no: int) -> int:
                 row = json.loads(line)
             except ValueError:
                 continue
+            if exclude_sid and row.get("session") == exclude_sid:
+                continue
             total += int(row.get("session_tokens") or row.get("tokens") or 0)
     return total
 
 
 def _budget_state(project_dir: Path, chapter_no: int, sid: str) -> dict | None:
     """预算三态（C-3）：normal / warning(≥单章预算) / halt(≥预算×止损倍数)。
-    spend = 本章会话已烧（含重试/修订分桶）+ 账本本章历史行。"""
+    spend = 本章会话已烧（含重试/修订分桶）+ 账本本章历史行（排除本会话行）。"""
     b = _budget_of(project_dir)
     if not b:
         return None
     s = _sessions.get(sid or "", {})
     session_t = int(s.get("tokens", 0))
-    ledger_t = _chapter_ledger_tokens(project_dir, chapter_no)
+    ledger_t = _chapter_ledger_tokens(project_dir, chapter_no, exclude_sid=sid)
     spend = session_t + ledger_t
     line = int(b.get("chapter_budget") or 0)
     halt = int(line * float(b.get("halt_multiplier") or 2.0))
@@ -1824,6 +1832,112 @@ def handover_save(body: HandoverSaveIn):
                  encoding="utf-8", newline=chr(10))
     return {"ok": True, "file": f.name,
             "cli": "网页落盘 = 草稿存项目根 00_交接汇总-草稿-*.md（不覆盖手写版）"}
+
+
+# ---- 量产连跑（v0.12）：章计划表规划器（0 token）——循环在前端（J1）----
+# 设计：工作台v0.12-量产连跑-设计设想.md §二-§六。每站复用既有执法：
+# 简报冻结→单发链（outline/beats/generate）→门禁→交付→digest 校验→
+# 低风险合并→预算三态。红即停（§五），无自动修订，批量不跨弧末。
+
+@router.get("/longform/batch/plan")
+def longform_batch_plan(project: str, start: int, count: int = 5):
+    """章计划表（§三 简报规划器）：M 份 G0 简报自动产出（钩子链/关键词派生
+    J6/关键章自动标记 J4）+ 预检数据（成本预估/路由检查/弧边界）。规划 0 token；
+    审批=冻结简报，前端循环照表执行（J1），探针章与关键章自动摘出。"""
+    cfg = appstate.load_config()
+    d = _project_dir(cfg, project)
+    if not _is_longform(d):
+        raise HTTPException(400, "该项目不是长篇模式")
+    if not (1 <= count <= 10):
+        raise HTTPException(400, "批量 1–10 章（J2 硬顶：漂移以章为单位累积）")
+    outline = d / "outline.md"
+    otext = outline.read_text(encoding="utf-8") if outline.is_file() else ""
+    arcs = _parse_arcs(otext)
+    arc = next((a for a in arcs if a["start"] <= start <= a["end"]), None)
+    if not arc:
+        raise HTTPException(400, f"第 {start} 章不在任何弧内——先开弧（批量不跨弧末）")
+    ms = d / "manuscript"
+    max_ch = 0
+    if ms.is_dir():
+        for f in ms.glob("*.md"):
+            if m := re.match(r"(\d+)", f.stem):
+                max_ch = max(max_ch, int(m.group(1)))
+    if start <= max_ch:
+        raise HTTPException(400, f"起始章 {start} 已交付或已存在（现役 {max_ch}）"
+                                 "——连跑只吃未写的新章")
+    end = min(start + count - 1, arc["end"])
+    effective = end - start + 1
+    hero_state, ff_text, ff_titles = "", "", []
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
+        from store import Store  # noqa: E402
+        store = Store(d)
+        try:
+            recap = store.recap(3)
+        finally:
+            store.close()
+        recent = recap.get("recent") or []
+        if recent:
+            latest = max(recent, key=lambda r: int(r.get("chapter") or 0))
+            hero_state = str(latest.get("digest", ""))[:200]
+        ff = recap.get("open_foreshadow") or []
+        ff_titles = [r["title"] for r in ff]
+        ff_text = "；".join(f"{r['title']}（第{r['planted_chapter']}章埋，待回收）"
+                            for r in ff)[:300]
+    except Exception:  # noqa: BLE001
+        pass
+    core_names = []
+    nj = d / "bible" / "names.json"
+    if nj.is_file():
+        try:
+            core_names = [str(x.get("name", "")).strip()
+                          for x in json.loads(nj.read_text(encoding="utf-8")
+                                              ).get("names", [])
+                          if isinstance(x, dict) and str(x.get("name", "")).strip()]
+        except (OSError, ValueError):
+            pass
+    anchor_terms = [t.strip() for t in re.split("[、，,]", arc["anchors"])
+                    if t.strip()]
+    rows, prev_hook = [], _prev_ending_hook(d, start)
+    for i, n in enumerate(range(start, end + 1)):
+        off = n - arc["start"] + 1
+        total = arc["end"] - arc["start"] + 1
+        brief = {"anchor": arc["anchors"], "hero_state": hero_state,
+                 "arc_pos": (f"弧{arc['no']}《{arc['title']}》第 {off}/{total} 章"
+                             f"（全弧第 {arc['start']}-{arc['end']} 章）"),
+                 "foreshadow": ff_text, "quirks": "", "ending_hook": "",
+                 "bridge": prev_hook if i == 0 else "",
+                 "chapter_type": "mass"}
+        key_reason = ""
+        if n == arc["end"]:
+            brief["chapter_type"], key_reason = "key", "弧末章"
+        elif ff_titles:
+            brief["chapter_type"], key_reason = "key", "有未回收伏笔"
+        rows.append({"chapter_no": n, "brief": brief,
+                     "title": f"第{n}章",
+                     "keywords": (core_names[:6] + anchor_terms[:4]),
+                     "key_reason": key_reason,
+                     "probe": (n - arc["start"]) < 2})
+    costs = []
+    costf = d / "style" / "cost.jsonl"
+    if costf.is_file():
+        for line in costf.read_text(encoding="utf-8").splitlines():
+            if "web-create" not in line:
+                continue
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            t = int(r.get("session_tokens") or r.get("tokens") or 0)
+            if t:
+                costs.append(t)
+    median = sorted(costs)[len(costs) // 2] if costs else 0
+    return {"arc": arc, "start": start, "end": end,
+            "clamped": effective < count, "rows": rows,
+            "estimate_tokens": median * effective, "samples": len(costs),
+            "write_mass": bool(cfg.get("routing", {}).get("write_mass")),
+            "probe_rows": sum(1 for r in rows if r["probe"]),
+            "max_ch": max_ch}
 
 
 class ArcCreateIn(BaseModel):
