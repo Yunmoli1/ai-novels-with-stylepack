@@ -1006,6 +1006,84 @@ class TestWebServer(unittest.TestCase):
             "project": "章节管理书", "file": "../../pack.json"})
         self.assertEqual(miss.status_code, 404)
 
+    def test_longform_project_skeleton_and_arc(self):
+        """v0.11 阶段 A：长篇项目骨架（防线/宪法/硬数字表/结构化卷纲）+
+        开新弧（四字段+数字账落盘）+ longform 标记 + 轻量回归。"""
+        r = self.client.post("/app/api/projects/create", json={
+            "name": "长篇书", "mode": "longform"})
+        self.assertEqual(r.status_code, 200)
+        d = "；".join(r.json()["notes"])
+        self.assertIn("长篇骨架", d)
+        ws = Path(self.tmp.name) / "ws" / "长篇书"
+        for f in ("00_写作防线.md", "00_项目宪法.md", "bible/硬数字表.md",
+                  "outline.md"):
+            self.assertTrue((ws / f).is_file(), f)
+        defense = (ws / "00_写作防线.md").read_text(encoding="utf-8")
+        self.assertIn("G0", defense) and self.assertIn("预算纪律", defense)
+        constitution = (ws / "00_项目宪法.md").read_text(encoding="utf-8")
+        self.assertIn("条款由作者填写", constitution)
+        # 轻量项目不带长篇骨架
+        self.client.post("/app/api/projects/create", json={"name": "轻量书"})
+        lw = Path(self.tmp.name) / "ws" / "轻量书"
+        self.assertFalse((lw / "00_写作防线.md").exists())
+        # projects 标记
+        pr = self.client.get("/app/api/projects").json()
+        flags = {x["name"]: x["longform"] for x in pr["projects"]}
+        self.assertTrue(flags["长篇书"])
+        self.assertFalse(flags["轻量书"])
+        # 状态端点
+        st = self.client.get("/app/api/longform/status",
+                             params={"project": "长篇书"}).json()
+        self.assertTrue(st["longform"])
+        self.assertEqual(st["arcs"], [])
+        self.assertEqual(st["next_arc_no"], 1)
+        # 开新弧：缺字段 400
+        bad = self.client.post("/app/api/longform/arc_create", json={
+            "project": "长篇书", "title": "弧", "start": 1, "end": 10,
+            "anchors": "", "tension": "x", "hooks": "y"})
+        self.assertEqual(bad.status_code, 400)
+        # 正常开弧（含硬数字账）
+        ok = self.client.post("/app/api/longform/arc_create", json={
+            "project": "长篇书", "title": "敲门与旧账", "start": 1, "end": 10,
+            "anchors": "锚点甲、锚点乙", "tension": "冲突与代价",
+            "hooks": "与弧三勾连", "per_chapter": 3500,
+            "numbers": [{"name": "敲声频率", "value": "每夜子时一组三下"},
+                        {"name": "旧案人数", "value": "总队39"}]})
+        self.assertEqual(ok.status_code, 200)
+        self.assertEqual(ok.json()["arc_no"], 1)
+        outline = (ws / "outline.md").read_text(encoding="utf-8")
+        self.assertIn("【弧1·敲门与旧账】（第1-10章）", outline)
+        self.assertIn("原作锚点：锚点甲、锚点乙", outline)
+        nums = (ws / "bible" / "硬数字表.md").read_text(encoding="utf-8")
+        self.assertIn("敲声频率", nums) and self.assertIn("总队39", nums)
+        self.assertIn("| 敲声频率 | 每夜子时一组三下 |", nums)
+        # 第二弧自动编号 + 章号区间校验
+        self.client.post("/app/api/longform/arc_create", json={
+            "project": "长篇书", "title": "弧二", "start": 11, "end": 20,
+            "anchors": "a", "tension": "b", "hooks": "c"})
+        st2 = self.client.get("/app/api/longform/status",
+                              params={"project": "长篇书"}).json()
+        self.assertEqual([a["no"] for a in st2["arcs"]], [1, 2])
+        self.assertEqual(st2["next_arc_no"], 3)
+        rng = self.client.post("/app/api/longform/arc_create", json={
+            "project": "长篇书", "title": "x", "start": 20, "end": 10,
+            "anchors": "a", "tension": "b", "hooks": "c"})
+        self.assertEqual(rng.status_code, 400)
+        big = self.client.post("/app/api/longform/arc_create", json={
+            "project": "长篇书", "title": "x", "start": 1, "end": 99,
+            "anchors": "a", "tension": "b", "hooks": "c"})
+        self.assertEqual(big.status_code, 400)
+        # 轻量项目开弧拒绝
+        light = self.client.post("/app/api/longform/arc_create", json={
+            "project": "轻量书", "title": "x", "start": 1, "end": 10,
+            "anchors": "a", "tension": "b", "hooks": "c"})
+        self.assertEqual(light.status_code, 400)
+        # 档案编辑器可改防线/宪法（白名单）
+        g = self.client.get("/app/api/bible/file",
+                            params={"project": "长篇书",
+                                    "path": "00_项目宪法.md"})
+        self.assertEqual(g.status_code, 200)
+
     def test_unconfigured_route_fails_clean(self):
         cfg = appstate.load_config(self.cfg_path)
         cfg["routing"]["write"] = None

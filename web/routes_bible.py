@@ -25,7 +25,7 @@ ALLOWED = [
     ("bible/", (".md", ".json")),
     ("canon/", (".md", ".json")),
 ]
-ALLOWED_FILES = {"outline.md"}
+ALLOWED_FILES = {"outline.md", "00_写作防线.md", "00_项目宪法.md"}
 
 
 def _check_path(project_dir: Path, rel: str) -> Path:

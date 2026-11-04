@@ -228,8 +228,11 @@ def projects():
         packs += [e for e in (_pack_entry(f"local/{d.name}", d)
                               for d in sorted(local.iterdir())
                               if d.is_dir() and (d / "pack.json").is_file()) if e]
+    projects = appstate.discover_projects(_ws_root(cfg))
+    for pr in projects:
+        pr["longform"] = _is_longform(_ws_root(cfg) / pr["name"])
     return {"workspace_root": str(_ws_root(cfg)),
-            "projects": appstate.discover_projects(_ws_root(cfg)),
+            "projects": projects,
             "packs": packs}
 
 
@@ -919,7 +922,7 @@ def do_save(body: SaveIn):
         gitignore.write_text("*\n!.gitignore\n", encoding="utf-8", newline="\n")
     record = {
         "ts": datetime.datetime.now().isoformat(timespec="seconds"),
-        "tool": "web-create v0.6.8", "session_id": body.session_id,
+        "tool": "web-create v0.11.0", "session_id": body.session_id,
         "project": body.project, "pack": body.pack,
         "chapter_no": body.chapter_no, "title": title,
         "keywords": body.keywords,
@@ -950,6 +953,7 @@ def do_save(body: SaveIn):
 
 class ProjectCreateIn(BaseModel):
     name: str
+    mode: str = "light"            # light=现状 | longform=长篇连载（v0.11 骨架）
     pack: str | None = None        # 可选：风格包钉扎（export → style/pinned-pack.md）
     canon_pack: str | None = None  # 可选：canon 包钉扎（terms 快照 → canon/）
 
@@ -998,9 +1002,188 @@ def project_create(body: ProjectCreateIn):
     # 可选 canon 包钉扎（terms 快照 + card）
     if body.canon_pack:
         notes.append(_pin_canon(d, body.canon_pack))
+    # 长篇模式骨架（v0.11 阶段 A）：防线/宪法/硬数字表/结构化卷纲
+    if body.mode == "longform":
+        notes += _longform_skeleton(d)
     return {"ok": True, "name": d.name, "notes": notes,
             "cli": "网页建项目 = 手工建 manuscript/bible/style 目录；"
                    "钉扎 = python scripts/export_pack.py <包> --out <项目>/style/pinned-pack.md"}
+
+
+# ---- 长篇模式（v0.11 阶段 A）：骨架模板与弧管理 ----
+# 治理框架来源：灾厄前线实战验证（写作防线 G0-G4 / 硬数字表 / 弧结构）。
+# 公理：①成本=轮数×上下文重发；②规范层必须对描述层有执法权。
+
+LONGFORM_MARKER = "00_写作防线.md"  # 项目根存在此文件 = 长篇模式
+
+TPL_DEFENSE = """# 写作防线
+
+> 长篇模式治理框架（StylePack v0.11 内置模板，源自长篇连载实战验证）。
+> 本文件是项目的**执法手册**：所有写作循环受以下闸门约束。
+
+## 闸门
+
+| 闸门 | 时机 | 手段 | 拦截动作 |
+|---|---|---|---|
+| G0 写前 | 每章生成前 | 七字段简报（锚点/主角状态/弧线位置/伏笔动作/出场口癖/结尾钩子/衔接） | 缺字段不生成（工作台表单强制） |
+| G1 写后 | 每章落盘后 | 门控检查（字数/标点/锚点在场/主角在场/专名正字） | FAIL 不修复不进下一章 |
+| G2 轮末 | 每 10 章 | 结构检查 + 拆账留痕（历史页） | 违规项当轮修复 |
+| G3 漂移网 | 每弧末 | 独立对照审查（对照大纲/硬数字表/人物档案） | 必修项未清不开新弧 |
+| G4 验收 | 每弧末 | 作者抽读 | 否决=最高指令 |
+
+## 预算纪律
+
+- 单章修稿预算：＿＿万 tokens；单弧预算：＿＿万
+- 超预警：停止并诊断（成本=轮数×上下文重发，不是产出×单价）
+- 禁止整章重写式返修；修稿一律 diff 级
+
+## 规范层/描述层等级制
+
+- 规范层（不可被正文无声覆盖）：00_项目宪法.md、outline.md 铁律、bible/硬数字表.md、本文件
+- 正文与规范层冲突时：**停写上报**，不许圆稿
+"""
+
+TPL_CONSTITUTION = """# 项目宪法（规范层·最高约束）
+
+> 本文件是项目的规范层：正文与本文冲突时，停写上报，不得圆稿。
+> 条款由作者填写——填下的每一条都对写作流程有执法权。
+
+## 底线（不可违背）
+1. 
+2. 
+
+## 每章必含
+- 
+
+## 禁区
+- 
+"""
+
+TPL_NUMBERS = """# 硬数字表
+
+> 规范层附件：正文会出现的硬数字（频率/时间/人数/金额/计数）**唯一口径**。
+> 写作只准引用本表数字，不得自造；弧末审查以本表为对照基准。
+> 每开新弧追加一节；改数须留痕（旧值→新值+理由）。
+"""
+
+TPL_OUTLINE_LONGFORM = """# 卷纲
+
+## 卷一 卷名
+铁律：（本卷不可违背的约束，逐条列出）
+"""
+
+
+def _longform_skeleton(d: Path) -> list[str]:
+    notes = []
+    for path_obj, tpl in ((d / LONGFORM_MARKER, TPL_DEFENSE),
+                          (d / "00_项目宪法.md", TPL_CONSTITUTION),
+                          (d / "bible" / "硬数字表.md", TPL_NUMBERS),
+                          (d / "outline.md", TPL_OUTLINE_LONGFORM)):
+        path_obj.write_text(tpl, encoding="utf-8", newline="\n")
+    notes.append("长篇骨架：00_写作防线.md（G0-G4 闸门模板）+ 00_项目宪法.md（条款待填）"
+                 " + bible/硬数字表.md + 结构化卷纲")
+    return notes
+
+
+def _is_longform(d: Path) -> bool:
+    return (d / LONGFORM_MARKER).is_file()
+
+
+def _parse_arcs(outline_text: str) -> list[dict]:
+    """解析 outline.md 的弧块：### 【弧N·弧名】（第X-Y章）+ 四字段列表。"""
+    import re as _re
+    arcs = []
+    pat = ("^###" + chr(92) + "s*【弧(" + chr(92) + "d+)·(.+?)】（第("
+           + chr(92) + "d+)-(" + chr(92) + "d+)章）" + chr(10)
+           + "- 原作锚点：(.*)" + chr(10)
+           + "- 张力设计：(.*)" + chr(10)
+           + "- 勾稽点：(.*)" + chr(10)
+           + "- 章数字数：(.*)$")
+    for m in _re.finditer(pat, outline_text, _re.M):
+        arcs.append({"no": int(m.group(1)), "title": m.group(2),
+                     "start": int(m.group(3)), "end": int(m.group(4)),
+                     "anchors": m.group(5).strip(), "tension": m.group(6).strip(),
+                     "hooks": m.group(7).strip(), "size": m.group(8).strip()})
+    return arcs
+
+
+@router.get("/longform/status")
+def longform_status(project: str):
+    cfg = appstate.load_config()
+    d = _project_dir(cfg, project)
+    if not _is_longform(d):
+        return {"longform": False, "arcs": []}
+    outline = d / "outline.md"
+    arcs = _parse_arcs(outline.read_text(encoding="utf-8")) if outline.is_file() else []
+    ms = d / "manuscript"
+    max_ch = 0
+    if ms.is_dir():
+        for f in ms.glob("*.md"):
+            mm = re.match(r"(\d+)", f.stem)
+            if mm:
+                max_ch = max(max_ch, int(mm.group(1)))
+    return {"longform": True, "arcs": arcs, "max_chapter": max_ch,
+            "next_arc_no": (arcs[-1]["no"] + 1) if arcs else 1,
+            "next_start": max(max_ch + 1, (arcs[-1]["end"] + 1) if arcs else 1)}
+
+
+class ArcCreateIn(BaseModel):
+    project: str
+    title: str
+    start: int
+    end: int
+    anchors: str
+    tension: str
+    hooks: str
+    per_chapter: int = 3500
+    numbers: list[dict] = []  # [{name, value}]——开弧即定账
+
+
+@router.post("/longform/arc_create")
+def longform_arc_create(body: ArcCreateIn):
+    """开新弧：弧块追加进 outline.md（卷纲），硬数字表追加对应节。
+    四字段+数字账一次定齐——这是硬数字表防再犯机制的入口。"""
+    title = (body.title or "").strip()
+    if not title:
+        raise HTTPException(400, "弧名不能为空")
+    if not (1 <= body.start <= body.end):
+        raise HTTPException(400, "章号区间非法（需 1 ≤ 起 ≤ 止）")
+    if body.end - body.start + 1 > 60:
+        raise HTTPException(400, "单弧超过 60 章——请拆弧（防线：弧是审查与预算单位）")
+    if not (body.anchors or "").strip() or not (body.tension or "").strip()             or not (body.hooks or "").strip():
+        raise HTTPException(400, "四字段缺一不可（原作锚点/张力设计/勾稽点）")
+    cfg = appstate.load_config()
+    d = _project_dir(cfg, body.project)
+    if not _is_longform(d):
+        raise HTTPException(400, "该项目不是长篇模式")
+    outline = d / "outline.md"
+    text = outline.read_text(encoding="utf-8") if outline.is_file()         else TPL_OUTLINE_LONGFORM
+    arcs = _parse_arcs(text)
+    no = (arcs[-1]["no"] + 1) if arcs else 1
+    NL = chr(10)
+    block = (f"{NL}### 【弧{no}·{title}】（第{body.start}-{body.end}章）{NL}"
+             f"- 原作锚点：{body.anchors.strip()}{NL}"
+             f"- 张力设计：{body.tension.strip()}{NL}"
+             f"- 勾稽点：{body.hooks.strip()}{NL}"
+             f"- 章数字数：{body.end - body.start + 1} 章 × 约 {body.per_chapter} 字{NL}")
+    outline.write_text(text.rstrip() + NL + block,
+                       encoding="utf-8", newline=NL)
+    # 硬数字表追加节
+    nums = d / "bible" / "硬数字表.md"
+    sec = [f"{NL}## 弧{no}《{title}》（第{body.start}-{body.end}章）{NL}",
+           "| 账目 | 口径 |", "|---|---|"]
+    for item in body.numbers:
+        name = str(item.get("name", "")).strip()[:40]
+        value = str(item.get("value", "")).strip()[:120]
+        if name:
+            sec.append(f"| {name} | {value} |")
+    if len(sec) == 3:
+        sec.append("| （本弧无预设硬数字——正文出现关键数字时回填本表） | — |")
+    with nums.open("a", encoding="utf-8", newline=NL) as f:
+        f.write(NL.join(sec) + NL)
+    return {"ok": True, "arc_no": no, "outline_block": block.strip(),
+            "numbers_rows": len(sec) - 3,
+            "cli": "网页开弧 = 在 outline.md 追加弧块 + bible/硬数字表.md 追加节"}
 
 
 CANONPACKS = ROOT / "canonpacks"

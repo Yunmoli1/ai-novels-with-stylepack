@@ -36,6 +36,7 @@
 <div class="panel">
   <label>项目 <select id="project" onchange="switchProject()"></select></label>
   <button class="btn ghost" onclick="newProject()">＋ 新建项目</button>
+  <button class="btn ghost" id="btn_arc" style="display:none" onclick="newArc()">开新弧</button>
   <label>风格包 <select id="pack" onchange="loadPresets()"></select></label>
   <label>章节号 <input id="chapter_no" type="number" value="1" style="width:80px"></label>
   <label>章节题 <input id="title" style="width:200px" placeholder="如 尸潮前夜"></label>
@@ -110,7 +111,7 @@
 const S = { assembly: null, session_id: '', chosen: null, beats: [],
             drafts: [], lastOptions: null, stage: -1, modelLabel: '-',
             slots: [], activeSlot: null, packVersions: {},
-            batchNo: 0, batchStart: 0 };
+            batchNo: 0, batchStart: 0, projects: [] };
 const STAGES = ['装配', '立意', '拍子', '生成', '门禁', '交付'];
 const $ = id => document.getElementById(id);
 const esc = s => (s || '').replace(/</g, '&lt;').replace(/"/g, '&quot;');
@@ -167,7 +168,9 @@ function targetChars() {
 async function init() {
   setStage(-1);
   const d = await (await fetch('/app/api/projects')).json();
+  S.projects = d.projects || [];
   $('project').innerHTML = d.projects.map(p => `<option value="${p.name}">${p.name}${p.pinned ? '（钉扎：' + p.pinned.pack + ' v' + p.pinned.version + '）' : ''}</option>`).join('');
+  syncArcBtn();
   S.packVersions = {};
   (d.packs || []).forEach(p => S.packVersions[p.name] = p.version || '');
   $('pack').innerHTML = d.packs.map(p => `<option value="${p.name}">${p.name}</option>`).join('');
@@ -199,27 +202,67 @@ async function renderOnboard(d) {
     step(false, '④ 选风格包 → 装配预览 → 写第一章');
 }
 const chr10 = () => String.fromCharCode(10);
+const ARC_ZH = '一二三四五六七八九十';
 async function newProject() {
   const name = prompt('项目名（一本书一个项目，中英文均可）：');
   if (!name) return;
+  const longform = confirm('启用长篇模式？' + chr10() + '（卷/弧/章结构 + 硬数字表 + 写作防线/宪法模板。' + chr10() + '10 万字以上连载选【确定】；短篇/轻量选【取消】）');
+  const mode = longform ? 'longform' : 'light';
   let pack = '';
   try {
     const packs = (await (await fetch('/app/api/projects')).json()).packs;
     pack = prompt('初始风格包（钉扎；可留空跳过）：' + chr10() + packs.map(p => p.name).join(chr10()), '') || '';
   } catch (e) {}
   try {
-    const r = await post('/app/api/projects/create', { name, pack: pack || null });
+    const r = await post('/app/api/projects/create', { name, mode, pack: pack || null });
     toast(`项目 ${r.name} 已建：${r.notes.join('；')}`, 'good');
     const d = await (await fetch('/app/api/projects')).json();
+    S.projects = d.projects || [];
+    syncArcBtn();
     $('project').innerHTML = d.projects.map(p => `<option value="${p.name}">${p.name}${p.pinned ? '（钉扎：' + p.pinned.pack + ' v' + p.pinned.version + '）' : ''}</option>`).join('');
     $('project').value = r.name;
     switchProject();
     renderOnboard(d);
   } catch (e) { toast(e.message, 'bad'); }
 }
+function syncArcBtn() {
+  const cur = (S.projects || []).find(p => p.name === $('project').value);
+  $('btn_arc').style.display = cur && cur.longform ? '' : 'none';
+}
+async function newArc() {
+  const title = prompt('弧名（本弧的张力主题，如：敲门与旧账）：');
+  if (!title) return;
+  const start = prompt('起始章号：');
+  if (!start) return;
+  const end = prompt('结束章号（单弧建议 ≤20 章）：');
+  if (!end) return;
+  const anchors = prompt('原作锚点（本弧必落的原作元素，逗号分隔）：');
+  if (anchors === null) return;
+  const tension = prompt('张力设计（本弧的冲突与代价）：');
+  if (tension === null) return;
+  const hooks = prompt('勾稽点（与其他弧/伏笔的勾连）：');
+  if (hooks === null) return;
+  const per = prompt('单章字数目标：', '3500');
+  if (!per) return;
+  let numbers = [];
+  const numsRaw = prompt('硬数字（开弧定账，一条一行，格式：账目=口径；留空跳过）：');
+  if (numsRaw) {
+    numbers = numsRaw.split(chr10()).map(s => {
+      const i = s.indexOf('=');
+      return i > 0 ? { name: s.slice(0, i).trim(), value: s.slice(i + 1).trim() } : null;
+    }).filter(Boolean);
+  }
+  try {
+    const r = await post('/app/api/longform/arc_create', {
+      project: $('project').value, title, start: +start, end: +end,
+      anchors, tension, hooks, per_chapter: +per, numbers });
+    toast(`弧${ARC_ZH[r.arc_no - 1] || r.arc_no}《${title}》已立：卷纲 + 硬数字表已落盘`, 'good');
+  } catch (e) { toast(e.message, 'bad'); }
+}
 // ---- 方案槽 ----
 async function switchProject() {
   S.activeSlot = null;
+  syncArcBtn();
   $('title').value = ''; $('keywords').value = '';  // 新项目新章节：清残留
   await loadPresets(); await loadSlots();
   try {  // 章节号推荐：manuscript 最大 +1（防错乱致锚定失效）
