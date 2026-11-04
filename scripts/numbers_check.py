@@ -24,6 +24,8 @@ import re
 import sys
 from pathlib import Path
 
+import splib  # noqa: E402 —— GBK 纪律：入口统一 force_utf8_stdio（CI cp936 管道）
+
 ZH_DIGIT = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
             "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
 ZH_UNIT = {"十": 10, "百": 100, "千": 1000, "万": 10000, "亿": 100000000}
@@ -164,6 +166,7 @@ def check_chapter(text: str, values: list, free: set) -> list[str]:
 
 
 def main() -> int:
+    splib.force_utf8_stdio()  # GBK 纪律：Windows cp936 管道下报告必须仍是 UTF-8
     ap = argparse.ArgumentParser(
         description="正文数字 vs 硬数字表口径对照（advisory 报不拦）")
     ap.add_argument("target", help="章节文件；--all 时为项目目录")

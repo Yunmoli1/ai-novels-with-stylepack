@@ -1179,8 +1179,9 @@ class TestWebServer(unittest.TestCase):
                         encoding="utf-8", newline="\n")
         r = subprocess.run([sys.executable, str(S / "scripts" / "numbers_check.py"),
                             str(good), "--ledger", str(ledger), "--chapter", "1"],
-                           capture_output=True, encoding="utf-8")
-        out = r.stdout + r.stderr
+                           capture_output=True, encoding="utf-8",
+                           errors="replace")
+        out = (r.stdout or "") + (r.stderr or "")
         self.assertEqual(r.returncode, 0, out)
         self.assertNotIn("口径缺失", out) and self.assertNotIn("表外", out)
         bad = ws / "manuscript" / "002-乙.md"
@@ -1188,8 +1189,9 @@ class TestWebServer(unittest.TestCase):
                        encoding="utf-8", newline="\n")
         r2 = subprocess.run([sys.executable, str(S / "scripts" / "numbers_check.py"),
                              str(bad), "--ledger", str(ledger), "--chapter", "1"],
-                            capture_output=True, encoding="utf-8")
-        out2 = r2.stdout + r2.stderr
+                            capture_output=True, encoding="utf-8",
+                            errors="replace")
+        out2 = (r2.stdout or "") + (r2.stderr or "")
         self.assertEqual(r2.returncode, 1, out2)
         self.assertIn("口径缺失", out2)          # 39 未出现
         self.assertIn("表外·设定级候选", out2)   # 1500 ≥100
@@ -1197,8 +1199,9 @@ class TestWebServer(unittest.TestCase):
         # --all 回扫（retroscan 模式）
         r3 = subprocess.run([sys.executable, str(S / "scripts" / "numbers_check.py"),
                              str(ws), "--ledger", str(ledger), "--all"],
-                            capture_output=True, encoding="utf-8")
-        out3 = r3.stdout + r3.stderr
+                            capture_output=True, encoding="utf-8",
+                            errors="replace")
+        out3 = (r3.stdout or "") + (r3.stderr or "")
         self.assertEqual(r3.returncode, 1, out3)
         self.assertIn("001-甲.md", out3) and self.assertIn("002-乙.md", out3)
         self.assertIn("2 章", out3)
