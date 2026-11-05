@@ -2,6 +2,35 @@
 
 所有显著变更记录于此。格式参照 Keep a Changelog，版本遵循 SemVer。
 
+## [0.13.2] - 2026-11-05
+
+### Added（工作台分区改版·第三期：C 盲测台 v2——多臂参数化）
+- **臂位可配置**（≥2 臂，任意组合）：`风格包` / `canon 包` / `风格+canon` /
+  `裸模型`——多臂对局（2-4 段并列盲选，打乱甲乙丙丁）；
+- **canon 臂**（补齐 v0.5.1 CLI 时代断掉的能力）：新提示词
+  `blind_canon_prompt`（canon card+must/ban 锚定，不含文风档案）与
+  `blind_both_prompt`（双材料混合臂）；canon 包独立下拉；
+- **判读问题随臂位变**：风格臂="哪段像作者"；canon 臂="哪段更贴合世界观"；
+  混合臂双维度由人分判；
+- **胜率分轨**（判定纪律：两维度独立测量互不污染）：results.tracks 按臂型
+  分计 wins/n/rate；calibration 入账带 tracks；风格轨口径与旧版一致
+  （win_rate/hits/total 兼容字段保留）；
+- **内容可选**（用户原话落档）：轮数可选（1-8，默认 3）+ 题库逐题勾选
+  （topic_ids 1-based，空=取前 N 题）；
+- **会话格式 v2**：rounds[].segments=[{label, arm, text}]（arm 绝不进判读
+  视图——泄漏测试升级断言）；legacy 会话（甲/乙+packed）按旧路径判读，
+  向后兼容；
+- UI：臂位勾选/canon 下拉/轮数/题目勾选，N 段并列判读与 N 选一按钮，
+  结果页分轨展示。
+
+### Fixed
+- 盲测非法选项校验顺序（先轮次判重后标签校验——判完的轮 409 语义不变）
+
+### 测试
+- test_blind_full_loop_no_leak 升级 v2（泄漏断言加 '"arm"' 不泄漏/分轨断言/
+  calibration 带 tracks）+ 新增 test_blind_canon_arm（臂位校验经 job 浮出/
+  伪 canon 包 patch/三臂对局/canon 轨独立计分不被风格轨污染）；**测试 183+9**
+
 ## [0.13.1] - 2026-11-05
 
 ### Changed（工作台分区改版·第二期：B 单章快写瘦身——分家完成）

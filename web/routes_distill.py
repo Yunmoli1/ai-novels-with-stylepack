@@ -781,9 +781,14 @@ def publish(body: PublishIn):
                    f"手动定稿 = 编辑 pack.json 去 status 字段（local 层再移动目录）"}
 
 
-# ---- 盲测验收（v0.8.0）：A/B 对局 + 网页判读 + 胜率入 calibration ----
+# ---- 盲测验收 v2（v0.13.2）：多臂参数化（风格/canon/混合/裸）+ 轮数/题库
+# 可选 + 胜率分轨（style/canon 独立测量——判定纪律：单维度结论不可终判）。
+# 会话格式 v2：rounds[].segments=[{label, arm, text}]（arm 绝不进判读视图）；
+# 旧格式（甲/乙+packed 键）按 legacy 路径判读，向后兼容。
 
 BLIND_ROUNDS = 3
+BLIND_ARMS = ("style", "canon", "both", "plain")
+CANONPACKS = ROOT / "canonpacks"
 
 
 def _blind_session_path(pack_dir: Path) -> Path:
@@ -797,6 +802,25 @@ def _pack_ctx(pack_dir: Path) -> str:
         f = pack_dir / name
         if f.is_file():
             parts.append(f.read_text(encoding="utf-8", errors="replace"))
+    return ("\n\n".join(parts))[:6000]
+
+
+def _canon_ctx(canon_dir: Path) -> str:
+    """canon 臂注入的锚定上下文（card + must/ban 术语表，截 6k 字）。"""
+    parts = []
+    card = canon_dir / "card.md"
+    if card.is_file():
+        parts.append(card.read_text(encoding="utf-8", errors="replace"))
+    terms = canon_dir / "terms.json"
+    if terms.is_file():
+        try:
+            t = splib.load_json(terms)
+            must = [x.get("term") for x in t.get("must", []) if isinstance(x, dict)]
+            ban = [x.get("term") for x in t.get("ban", []) if isinstance(x, dict)]
+            parts.append("must（按自然方式落实）：" + ("、".join(must) or "无")
+                         + "\nban（绝对不出现）：" + ("、".join(ban) or "无"))
+        except (OSError, ValueError):
+            pass
     return ("\n\n".join(parts))[:6000]
 
 
@@ -818,9 +842,22 @@ def _parse_topics(md: str) -> list[dict]:
 
 
 def _blind_run(payload: dict, job: dict) -> dict:
-    """盲测对局生成：无题库先出题（写入 tests/blind-prompts.md，可校订）→
-    每题带包/裸各生成一段 → 随机打乱甲乙 → blind-session.json。"""
+    """盲测对局生成 v2：无题库先出题 → 每题按臂位各生成一段 → 段间打乱
+    标甲乙丙丁 → blind-session.json（v2 格式：segments 带 arm，判读视图剥离）。"""
     pack_dir = _pack_dir_checked(payload["pack"])
+    arms = payload.get("arms") or ["style", "plain"]
+    arms = [a for a in arms if a in BLIND_ARMS]
+    seen = list(dict.fromkeys(arms))
+    if len(seen) < 2:
+        raise HTTPException(400, "臂位至少 2 个（盲测需要对比）")
+    canon_name = payload.get("canon_pack")
+    if ("canon" in seen or "both" in seen) and not canon_name:
+        raise HTTPException(400, "臂位含 canon/both 时必须选 canon 包")
+    canon_dir = CANONPACKS / canon_name if canon_name else None
+    if canon_dir is not None and not (canon_dir / "pack.json").is_file():
+        raise HTTPException(400, f"canon 包不存在：{canon_name}")
+    rounds_n = max(1, min(8, int(payload.get("rounds") or BLIND_ROUNDS)))
+    topic_ids = [int(x) for x in (payload.get("topic_ids") or []) if int(x) >= 1]
     cfg = appstate.load_config()
     sid = f"blind-{uuid.uuid4().hex[:8]}"
     (pack_dir / "tests").mkdir(exist_ok=True)
@@ -833,46 +870,66 @@ def _blind_run(payload: dict, job: dict) -> dict:
                               _pack_ctx(pack_dir)),
                           distillation.BLIND_TOPIC_MAX_TOKENS)
         topics_md.write_text(r["text"], encoding="utf-8", newline="\n")
-    topics = _parse_topics(topics_md.read_text(encoding="utf-8"))[:BLIND_ROUNDS]
+    topics = _parse_topics(topics_md.read_text(encoding="utf-8"))
+    if topic_ids:
+        topics = [t for i, t in enumerate(topics, 1) if i in topic_ids]
+        if not topics:
+            raise HTTPException(400, "题库勾选为空——至少勾一道题")
+    topics = topics[:rounds_n]
     if not topics:
         raise HTTPException(400, "blind-prompts.md 无可解析题目（格式：## 题 N + 提示：）")
+    pack_ctx = _pack_ctx(pack_dir)
+    canon_ctx = _canon_ctx(canon_dir) if canon_dir else ""
+
+    def _call(prompt: str) -> str:
+        r = _distill_call(cfg, sid, prompt,
+                          distillation.BLIND_GEN_MAX_TOKENS)
+        spend["prompt_tokens"] += r.get("prompt_tokens", 0)
+        spend["completion_tokens"] += r.get("completion_tokens", 0)
+        return r["text"].strip()
+
+    spend = {"prompt_tokens": 0, "completion_tokens": 0}
     import random
     rounds = []
-    spend = {"prompt_tokens": 0, "completion_tokens": 0}
     for i, t in enumerate(topics, 1):
         if job:
-            job["step"] = f"第 {i}/{len(topics)} 轮对局生成（带包/裸各一段）"
+            job["step"] = f"第 {i}/{len(topics)} 轮对局生成（{len(seen)} 臂）"
         topic_prompt = f"提示：{t['prompt']}"
-
-        def _call(prompt: str) -> str:
-            r = _distill_call(cfg, sid, prompt,
-                              distillation.BLIND_GEN_MAX_TOKENS)
-            spend["prompt_tokens"] += r.get("prompt_tokens", 0)
-            spend["completion_tokens"] += r.get("completion_tokens", 0)
-            return r["text"].strip()
-
-        packed = _call(distillation.blind_packed_prompt(
-            topic_prompt, _pack_ctx(pack_dir)))
-        plain = _call(distillation.blind_plain_prompt(topic_prompt))
-        first_is_packed = random.random() < 0.5
+        segs = []
+        for a in seen:
+            if a == "style":
+                prompt = distillation.blind_packed_prompt(topic_prompt, pack_ctx)
+            elif a == "canon":
+                prompt = distillation.blind_canon_prompt(topic_prompt, canon_ctx)
+            elif a == "both":
+                prompt = distillation.blind_both_prompt(topic_prompt,
+                                                        pack_ctx, canon_ctx)
+            else:
+                prompt = distillation.blind_plain_prompt(topic_prompt)
+            segs.append({"arm": a, "text": _call(prompt)})
+        random.shuffle(segs)
+        for lab, s in zip("甲乙丙丁", segs):
+            s["label"] = lab
         rounds.append({"no": i, "title": t["title"], "prompt": t["prompt"],
-                       "checklist": t["checklist"],
-                       "甲": packed if first_is_packed else plain,
-                       "乙": plain if first_is_packed else packed,
-                       "packed": "甲" if first_is_packed else "乙",
+                       "checklist": t["checklist"], "segments": segs,
                        "choice": None})
-    session = {"pack": pack_dir.name,
-               "created": datetime.datetime.now().isoformat(timespec="seconds"),
-               "rounds": rounds, "results": None}
+    session = {"pack": pack_dir.name, "canon_pack": canon_name,
+               "arms": seen, "created": datetime.datetime.now().isoformat(
+                   timespec="seconds"),
+               "rounds": rounds, "results": None, "v": 2}
     _blind_session_path(pack_dir).write_text(
         json.dumps(session, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8", newline="\n")
-    _pack_cost(pack_dir, spend, f"盲测对局 {len(rounds)} 轮")
-    return {"ok": True, "rounds": len(rounds)}
+    _pack_cost(pack_dir, spend, f"盲测对局 {len(rounds)} 轮×{len(seen)} 臂")
+    return {"ok": True, "rounds": len(rounds), "arms": seen}
 
 
 class BlindIn(BaseModel):
     pack: str
+    canon_pack: str | None = None
+    arms: list[str] = ["style", "plain"]
+    rounds: int = 3
+    topic_ids: list[int] = []  # 1-based 题 N 勾选；空=取前 N 题
 
 
 @router.post("/blind/start")
@@ -880,36 +937,48 @@ def blind_start(body: BlindIn):
     return {"job_id": _run_job("blind", _blind_run, body.model_dump())}
 
 
+def _view_round_v2(r: dict) -> dict:
+    """判读视图剥臂（防泄漏）：只给 label+text。"""
+    return {"no": r["no"], "title": r["title"], "prompt": r["prompt"],
+            "checklist": r.get("checklist", []),
+            "segments": [{"label": s["label"], "text": s["text"]}
+                         for s in r["segments"]]}
+
+
 @router.get("/blind/session")
 def blind_session(pack: str):
-    """判读视图：只给甲/乙文本与 checklist——**绝不含 packed 标记**（防泄漏）。"""
+    """判读视图：绝不含臂位标记（防泄漏）。legacy 会话走旧视图。"""
     d = _pack_dir_checked(pack)
     p = _blind_session_path(d)
     if not p.is_file():
         raise HTTPException(404, "还没有盲测对局——先生成")
     s = splib.load_json(p)
     view = {"pack": s["pack"], "done": s.get("results") is not None,
-            "rounds": [{k: r[k] for k in ("no", "title", "prompt", "checklist",
-                                          "甲", "乙")}
-                       for r in s["rounds"] if r.get("choice") is None]}
+            "arms": s.get("arms") or ["style", "plain"]}
     if s.get("results"):
         view["results"] = s["results"]  # 已判完：揭示
     else:
         judged = sum(1 for r in s["rounds"] if r.get("choice") is not None)
         view["progress"] = f"{judged}/{len(s['rounds'])}"
+    if s["rounds"] and "segments" in s["rounds"][0]:  # v2
+        view["rounds"] = [_view_round_v2(r) for r in s["rounds"]
+                          if r.get("choice") is None]
+    else:  # legacy（v0.8.0 旧会话）
+        view["legacy"] = True
+        view["rounds"] = [{k: r[k] for k in ("no", "title", "prompt",
+                                             "checklist", "甲", "乙")}
+                          for r in s["rounds"] if r.get("choice") is None]
     return view
 
 
 class BlindJudgeIn(BaseModel):
     pack: str
     round_no: int
-    choice: str  # 甲 | 乙 | 都不像
+    choice: str  # 甲/乙/丙/丁 | 都不像
 
 
 @router.post("/blind/judge")
 def blind_judge(body: BlindJudgeIn):
-    if body.choice not in ("甲", "乙", "都不像"):
-        raise HTTPException(400, "choice 须为 甲/乙/都不像")
     d = _pack_dir_checked(body.pack)
     p = _blind_session_path(d)
     if not p.is_file():
@@ -922,21 +991,49 @@ def blind_judge(body: BlindJudgeIn):
         raise HTTPException(404, f"没有第 {body.round_no} 轮")
     if r.get("choice"):
         raise HTTPException(409, f"第 {body.round_no} 轮已判定")
+    labels = ([sg["label"] for sg in r["segments"]] if "segments" in r
+              else ["甲", "乙"])
+    if body.choice not in (*labels, "都不像"):
+        raise HTTPException(400, f"choice 须为 {'/'.join(labels)}/都不像")
     r["choice"] = body.choice
     if all(x.get("choice") for x in s["rounds"]):
-        hits = sum(1 for x in s["rounds"] if x["choice"] == x["packed"])
-        s["results"] = {
-            "win_rate": round(hits / len(s["rounds"]), 2), "hits": hits,
-            "total": len(s["rounds"]),
-            "per_round": [{"no": x["no"], "packed": x["packed"],
-                           "choice": x["choice"]} for x in s["rounds"]]}
+        if "segments" in r:  # v2 分轨计分
+            tracks: dict = {}
+            for x in s["rounds"]:
+                for sg in x["segments"]:
+                    tr = tracks.setdefault(sg["arm"], {"wins": 0, "n": 0})
+                    tr["n"] += 1
+                if x["choice"] != "都不像":
+                    win = next(sg for sg in x["segments"]
+                               if sg["label"] == x["choice"])
+                    tracks[win["arm"]]["wins"] += 1
+            for tr in tracks.values():
+                tr["rate"] = round(tr["wins"] / tr["n"], 2) if tr["n"] else 0
+            st = tracks.get("style", {})
+            hits, total = st.get("wins", 0), st.get("n", 0)
+            s["results"] = {
+                "win_rate": round(hits / total, 2) if total else 0,
+                "hits": hits, "total": total, "tracks": tracks,
+                "per_round": [{"no": x["no"], "choice": x["choice"],
+                               "winner": next((sg["arm"] for sg in x["segments"]
+                                               if sg["label"] == x["choice"]),
+                                              "都不像")}
+                              for x in s["rounds"]]}
+        else:  # legacy
+            hits = sum(1 for x in s["rounds"] if x["choice"] == x["packed"])
+            s["results"] = {
+                "win_rate": round(hits / len(s["rounds"]), 2), "hits": hits,
+                "total": len(s["rounds"]),
+                "per_round": [{"no": x["no"], "packed": x["packed"],
+                               "choice": x["choice"]} for x in s["rounds"]]}
         # 胜率入 calibration（evals/ 与判读台同账本）
         cal_path = ROOT / "evals" / "calibration.json"
         try:
             cal = splib.load_json(cal_path) if cal_path.is_file() else {}
             cal[f"web_blind_{d.name}_{datetime.date.today():%Y%m%d}"] = {
                 "win_rate": s["results"]["win_rate"],
-                "hits": hits, "total": len(s["rounds"]),
+                "hits": s["results"]["hits"], "total": s["results"]["total"],
+                "tracks": s["results"].get("tracks"),
                 "via": "蒸馏台网页盲测"}
             splib.dump_json(cal, cal_path)
         except (OSError, ValueError):

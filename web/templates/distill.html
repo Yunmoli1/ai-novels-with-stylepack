@@ -124,13 +124,26 @@ python scripts/build_delta.py downloads/corpus/&lt;语料集&gt; --pack stylepac
 </div>
 
 <div class="panel">
-  <h2 style="margin-top:0">⑤.5 盲测验收（v0.8.0 · 模型调用，推荐定稿前跑）</h2>
+  <h2 style="margin-top:0">⑤.5 盲测验收（v0.13.2 多臂参数化 · 模型调用，推荐定稿前跑）</h2>
   <div class="genrow">
-    <button class="btn" id="btn_blind" onclick="blindStart()">生成盲测对局（3 轮）</button>
-    <span id="blind_out" class="meta">同题"带包/不带包"各生成一段、打乱甲乙——你来盲选哪段像作者；胜率入 calibration。</span>
+    <label>臂位（≥2）
+      <span class="genrow">
+        <label><input type="checkbox" class="arm_cb" value="style" checked> 风格包</label>
+        <label><input type="checkbox" class="arm_cb" value="canon"> canon 包</label>
+        <label><input type="checkbox" class="arm_cb" value="both"> 风格+canon</label>
+        <label><input type="checkbox" class="arm_cb" value="plain" checked> 裸模型</label>
+      </span></label>
+    <label>canon 包 <select id="blind_canon" style="max-width:160px"><option value="">（未选）</option></select></label>
+    <label>轮数 <input id="blind_rounds" type="number" value="3" min="1" max="8" style="width:60px"></label>
+    <label>题目勾选（1-based，逗号分隔，留空=取前 N 题）
+      <input id="blind_topics" placeholder="如 1,3" style="width:110px"></label>
+    <button class="btn" id="btn_blind" onclick="blindStart()">生成盲测对局</button>
   </div>
+  <p class="meta">每题按臂位各生成一段、打乱甲乙丙丁——你来盲选；风格臂问"哪段像作者"，
+  canon 臂问"哪段更贴合世界观"，胜率<strong>分轨</strong>入 calibration（互不污染）。
+  题库 tests/blind-prompts.md 可在步⑤编辑器校订。</p>
   <div id="blind_box"></div>
-  <div class="cli">等价技能：style-calibrate（A/B 盲测校准，胜率反推档案薄弱维度）；题库 tests/blind-prompts.md 可在步⑤编辑器校订</div>
+  <div class="cli">等价技能：style-calibrate（A/B 盲测校准，胜率反推档案薄弱维度）；canon 臂补齐 v0.5.1 CLI 时代断掉的能力</div>
 </div>
 
 <div class="panel">
@@ -449,20 +462,41 @@ async function doPublish() {
   } catch (e) { $('pub_out').textContent = '失败：' + e.message; }
 }
 
-// ---- 盲测（v0.8.0）----
+// ---- 盲测 v2（v0.13.2）：多臂参数化 + 分轨计分 ----
+let BLIND_TOPICS = [];
+async function loadBlindConfig() {
+  try {
+    const cps = (await api('/app/api/canon_packs')).packs || [];
+    $('blind_canon').innerHTML = '<option value="">（未选）</option>'
+      + cps.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+  } catch (e) {}
+}
+function armLabel(a) {
+  return { style: '风格包', canon: 'canon 包', both: '风格+canon', plain: '裸模型' }[a] || a;
+}
 async function blindStart() {
   const p = S.curPack || $('view_pack').value;
   if (!p) return alert('先选包');
-  if (!confirm('生成 3 轮盲测对局？每轮带包/裸各一段（共 7 次调用：出题+对局）。')) return;
+  const arms = [...document.querySelectorAll('.arm_cb:checked')].map(c => c.value);
+  if (arms.length < 2) return alert('臂位至少勾 2 个（盲测需要对比）');
+  const canon = $('blind_canon').value || null;
+  if ((arms.includes('canon') || arms.includes('both')) && !canon)
+    return alert('臂位含 canon/混合——请选 canon 包');
+  const rounds = Math.max(1, Math.min(8, +$('blind_rounds').value || 3));
+  const topicIds = ($('blind_topics').value || '').split(/[,,]/)
+    .map(s => +s.trim()).filter(n => n >= 1);
+  const calls = rounds * arms.length + 3;
+  if (!confirm(`生成 ${rounds} 轮 × ${arms.length} 臂（${arms.map(armLabel).join('/')}）盲测对局？约 ${calls} 次调用。`)) return;
   $('btn_blind').disabled = true;
   $('blind_out').textContent = '启动盲测 job……';
   try {
     const st = await api('/app/api/distill/blind/start', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ pack: p }) });
+      body: JSON.stringify({ pack: p, arms, canon_pack: canon,
+                             rounds, topic_ids: topicIds }) });
     const d = await pollJob(st.job_id, $('blind_out'));
     if (d.error) throw new Error(d.error);
-    $('blind_out').textContent = `✓ ${d.result.rounds} 轮对局就绪——开始判读`;
+    $('blind_out').textContent = `✓ ${d.result.rounds} 轮 × ${d.result.arms.length} 臂对局就绪——开始判读`;
     blindShow();
   } catch (e) { $('blind_out').textContent = '失败：' + e.message; }
   $('btn_blind').disabled = false;
@@ -473,26 +507,36 @@ async function blindShow() {
   try {
     const v = await api('/app/api/distill/blind/session?pack=' + encodeURIComponent(p));
     if (!v.rounds.length) {
-      $('blind_box').innerHTML = v.results
-        ? `<p class="meta">本轮盲测已完成：带包被认出 <strong>${v.results.hits}/${v.results.total}</strong>（胜率 ${v.results.win_rate}）——
-           每轮答案 ${v.results.per_round.map(r => `第${r.no}轮带包=${r.packed}（你选${r.choice}）`).join('；')}。重新生成对局可再测。</p>`
-        : '<p class="meta">（对局已全部判定）</p>';
+      if (v.results && v.results.tracks) {
+        const tr = Object.entries(v.results.tracks)
+          .map(([a, t]) => `${armLabel(a)}：被选 ${t.wins}/${t.n}（${t.rate}）`).join('｜');
+        $('blind_box').innerHTML = `<p class="meta">本轮盲测已完成（风格胜率
+          ${v.results.win_rate}，${v.results.hits}/${v.results.total}）——分轨：${tr}。
+          每轮：${v.results.per_round.map(r => `第${r.no}轮你选${r.choice}（${armLabel(r.winner)}）`).join('；')}。
+          重新生成对局可再测。</p>`;
+      } else if (v.results) {
+        $('blind_box').innerHTML = `<p class="meta">本轮盲测已完成：带包被认出
+          <strong>${v.results.hits}/${v.results.total}</strong>（胜率 ${v.results.win_rate}）——
+          每轮答案 ${v.results.per_round.map(r => `第${r.no}轮带包=${r.packed}（你选${r.choice}）`).join('；')}。</p>`;
+      } else $('blind_box').innerHTML = '<p class="meta">（对局已全部判定）</p>';
       return;
     }
     const r = v.rounds[0];
+    const segs = (r.segments || [
+      { label: '甲', text: r['甲'] }, { label: '乙', text: r['乙'] }]);
+    const segHtml = segs.map(s =>
+      `<div class="passage" style="max-height:30vh;overflow:auto"><strong>【${s.label}】</strong>
+${esc(s.text)}</div>`).join('');
+    const btns = segs.map(s =>
+      `<button class="btn" onclick="blindJudge('${s.label}')">选【${s.label}】</button>`).join('')
+      + `<button class="btn ghost" onclick="blindJudge('都不像')">都不像</button>`;
     $('blind_box').innerHTML = `
-      <p class="meta">第 ${r.no} 轮（剩余 ${v.progress || ''}）｜题：${esc(r.title)}——${esc(r.prompt)}</p>
+      <p class="meta">第 ${r.no} 轮（剩余 ${v.progress || ''}）｜题：${esc(r.title)}——${esc(r.prompt)}
+      ${v.arms ? '｜臂位：' + v.arms.map(armLabel).join('/') : ''}</p>
       <details><summary class="meta">期望特征 checklist（判卷辅助）</summary>
         <ul class="meta">${(r.checklist || []).map(c => '<li>' + esc(c) + '</li>').join('')}</ul></details>
-      <div class="passage" style="max-height:30vh;overflow:auto"><strong>【甲】</strong>
-${esc(r['甲'])}</div>
-      <div class="passage" style="max-height:30vh;overflow:auto"><strong>【乙】</strong>
-${esc(r['乙'])}</div>
-      <div class="genrow">
-        <button class="btn" onclick="blindJudge('甲')">更像作者是【甲】</button>
-        <button class="btn" onclick="blindJudge('乙')">更像作者是【乙】</button>
-        <button class="btn ghost" onclick="blindJudge('都不像')">都不像</button>
-      </div>`;
+      ${segHtml}
+      <div class="genrow">${btns}</div>`;
   } catch (e) { $('blind_box').innerHTML = '<p class="meta">' + e.message + '</p>'; }
 }
 async function blindJudge(choice) {
@@ -505,11 +549,12 @@ async function blindJudge(choice) {
     body: JSON.stringify({ pack: p, round_no: no, choice }) });
   if (d.finished) {
     const rs = d.results;
-    toast(`盲测完成：带包被认出 ${rs.hits}/${rs.total}（胜率 ${rs.win_rate}）`, 'good');
+    toast(`盲测完成：风格胜率 ${rs.win_rate}（${rs.hits}/${rs.total}）`
+      + (rs.tracks ? '｜分轨见报告' : ''), 'good');
   }
   blindShow();
 }
 setStep(-1);
-loadCorpus().then(loadPacks);
+loadCorpus().then(loadPacks).then(loadBlindConfig);
 </script>
 {% endblock %}

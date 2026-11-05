@@ -95,6 +95,10 @@ class MockDistillHandler(BaseHTTPRequestHandler):
                    + "## 题 3：夜航船" + N2
                    + "提示：第一人称，200–300 字。深夜渡口等船。" + N2
                    + "期望特征（判卷 checklist）：" + chr(10) + "- [ ] 物象承载" + chr(10))
+        elif "世界观锚定" in msg and "文风档案" in msg:
+            raw = "双臂的一段正文。风格与设定都齐。"
+        elif "世界观锚定" in msg:
+            raw = "canon 落地段。术语齐全。"
         elif "严格按下方「文风档案」" in msg:
             raw = "带包的一段正文。短句。收束克制。"
         elif msg.strip().startswith("提示：") and "只输出正文本身" in msg:
@@ -408,22 +412,35 @@ class TestDistillStageA(unittest.TestCase):
         # 题库已生成且可解析
         prompts = (pk / "tests" / "blind-prompts.md").read_text(encoding="utf-8")
         self.assertIn("## 题 1", prompts)
-        # 判读视图：不含 packed 标记（防泄漏）
+        # 判读视图：不含臂位标记（防泄漏——v2 用 segments/arm，视图只留 label）
         v = self.client.get("/app/api/distill/blind/session",
                             params={"pack": "rdpkg"}).json()
         raw = _json.dumps(v, ensure_ascii=False)
         self.assertNotIn('"packed"', raw)
+        self.assertNotIn('"arm"', raw)
         self.assertEqual(len(v["rounds"]), 3)
+        self.assertEqual(len(v["rounds"][0]["segments"]), 2)
         self.assertIn("带包的一段", raw)  # 文本本身在（甲或乙随机）
-        # 逐轮判定（按 session 文件真值选 → 全对 → 胜率 1.0）
+        # 逐轮判定（按 session 文件真值选风格臂 → 全对 → 风格胜率 1.0）
         sess = _json.loads((pk / "tests" / "blind-session.json")
                            .read_text(encoding="utf-8"))
+        self.assertEqual(sess["v"], 2)
         last = None
-        for r in sess["rounds"]:
+        for i, r in enumerate(sess["rounds"]):
+            pick = next(sg["label"] for sg in r["segments"]
+                        if sg["arm"] == "style")
+            if i == len(sess["rounds"]) - 1:  # 末轮先试非法选项（未判轮上 400）
+                bad = self.client.post("/app/api/distill/blind/judge", json={
+                    "pack": "rdpkg", "round_no": r["no"], "choice": "丙"})
+                self.assertEqual(bad.status_code, 400)
             last = self.client.post("/app/api/distill/blind/judge", json={
-                "pack": "rdpkg", "round_no": r["no"], "choice": r["packed"]}).json()
+                "pack": "rdpkg", "round_no": r["no"], "choice": pick}).json()
         self.assertTrue(last["finished"])
         self.assertEqual(last["results"]["win_rate"], 1.0)
+        # 分轨计分（v0.13.2）：style 轨 3/3
+        self.assertEqual(last["results"]["tracks"]["style"],
+                         {"wins": 3, "n": 3, "rate": 1.0})
+        self.assertEqual(last["results"]["tracks"]["plain"]["n"], 3)
         # 揭示后 session 视图带答案；重判被拒
         v2 = self.client.get("/app/api/distill/blind/session",
                              params={"pack": "rdpkg"}).json()
@@ -431,13 +448,11 @@ class TestDistillStageA(unittest.TestCase):
         again = self.client.post("/app/api/distill/blind/judge", json={
             "pack": "rdpkg", "round_no": 1, "choice": "甲"})
         self.assertEqual(again.status_code, 409)
-        bad = self.client.post("/app/api/distill/blind/judge", json={
-            "pack": "rdpkg", "round_no": 1, "choice": "丙"})
-        self.assertEqual(bad.status_code, 400)
         # calibration 入账（evals/ 真账本）——断言后即清理，测试不污染账本
         cal = _json.loads((S / "evals" / "calibration.json").read_text(encoding="utf-8"))
         keys = [k for k in cal if k.startswith("web_blind_rdpkg_")]
         self.assertTrue(keys)
+        self.assertIn("tracks", cal[keys[0]])
         for k in keys:
             del cal[k]
         (S / "evals" / "calibration.json").write_text(
@@ -445,6 +460,71 @@ class TestDistillStageA(unittest.TestCase):
             encoding="utf-8")
         gi = (S / ".gitignore").read_text(encoding="utf-8")
         self.assertIn("blind-session.json", gi)
+
+    def test_blind_canon_arm(self):
+        """v0.13.2 canon 臂：臂位校验（缺 canon 包 400）+ 三臂对局（风格/canon/
+        裸）+ 判读视图剥臂 + 分轨计分。"""
+        import time as _t
+        from unittest.mock import patch
+        import routes_distill
+        self._ingest()
+        self.client.post("/app/api/distill/pack", json={
+            "name": "rdcanon", "corpus_dir": "测试作者/落水记"})
+        (S / "stylepacks" / "rdcanon" / "card.md").write_text("卡", encoding="utf-8")
+        # 伪 canon 包（patch CANONPACKS 到 tmp——不动真 canonpacks/）
+        tmp_canon = Path(self.tmp.name) / "canonpacks" / "fakecanon"
+        tmp_canon.mkdir(parents=True)
+        (tmp_canon / "pack.json").write_text("{}", encoding="utf-8")
+        (tmp_canon / "card.md").write_text("世界观卡", encoding="utf-8")
+        (tmp_canon / "terms.json").write_text(_json.dumps(
+            {"must": [{"term": "落水镇"}], "ban": [{"term": "航空母舰"}]},
+            ensure_ascii=False), encoding="utf-8")
+        # 臂位校验（job 化：错误在 job 状态里浮出，非 HTTP 状态码）
+        def _run_and_wait(st):
+            for _ in range(100):
+                job = self.client.get(f"/app/api/distill/job/{st['job_id']}").json()
+                if job["status"] != "running":
+                    break
+                _t.sleep(0.1)
+            return job
+        b1 = _run_and_wait(self.client.post("/app/api/distill/blind/start", json={
+            "pack": "rdcanon", "arms": ["canon"]}).json())
+        self.assertEqual(b1["status"], "error")  # 臂位 <2
+        self.assertIn("臂位至少", b1["error"])
+        b2 = _run_and_wait(self.client.post("/app/api/distill/blind/start", json={
+            "pack": "rdcanon", "arms": ["style", "canon"]}).json())
+        self.assertEqual(b2["status"], "error")  # 缺 canon 包
+        self.assertIn("canon 包", b2["error"])
+        with patch.object(routes_distill, "CANONPACKS",
+                          Path(self.tmp.name) / "canonpacks"):
+            job = _run_and_wait(self.client.post(
+                "/app/api/distill/blind/start", json={
+                    "pack": "rdcanon", "arms": ["style", "canon", "plain"],
+                    "canon_pack": "fakecanon", "rounds": 2,
+                    "topic_ids": [1, 2]}).json())
+            self.assertEqual(job["status"], "done", str(job.get("error"))[:200])
+        self.assertEqual(job["result"]["arms"], ["style", "canon", "plain"])
+        v = self.client.get("/app/api/distill/blind/session",
+                            params={"pack": "rdcanon"}).json()
+        raw = _json.dumps(v, ensure_ascii=False)
+        self.assertNotIn('"arm"', raw)  # 臂位不泄漏
+        self.assertEqual(len(v["rounds"]), 2)
+        self.assertEqual(len(v["rounds"][0]["segments"]), 3)
+        for mark in ("带包的一段", "canon 落地段", "裸模型的一段正文"):
+            self.assertIn(mark, raw)
+        # 逐轮判给 canon 臂 → canon 轨 2/2，style 轨 0/2
+        sess = _json.loads((S / "stylepacks" / "rdcanon" / "tests"
+                            / "blind-session.json").read_text(encoding="utf-8"))
+        last = None
+        for r in sess["rounds"]:
+            pick = next(sg["label"] for sg in r["segments"]
+                        if sg["arm"] == "canon")
+            last = self.client.post("/app/api/distill/blind/judge", json={
+                "pack": "rdcanon", "round_no": r["no"], "choice": pick}).json()
+        self.assertTrue(last["finished"])
+        self.assertEqual(last["results"]["tracks"]["canon"]["rate"], 1.0)
+        self.assertEqual(last["results"]["tracks"]["style"]["wins"], 0)
+        self.assertEqual(last["results"]["win_rate"], 0)  # 风格轨独立，不被 canon 污染
 
 
     def test_job_start_and_poll(self):

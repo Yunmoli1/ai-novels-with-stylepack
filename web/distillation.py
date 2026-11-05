@@ -261,6 +261,37 @@ def blind_packed_prompt(topic_prompt: str, pack_ctx: str) -> str:
 {pack_ctx}"""
 
 
+def blind_canon_prompt(topic_prompt: str, canon_ctx: str) -> str:
+    """canon 臂（v0.13.2）：只给世界观锚定、不给文风档案——考世界观贴合
+    （must 落实/ban 不出现/设定不自造），与风格维度独立测量。"""
+    return f"""请严格按下方「世界观锚定」材料写作。
+
+{topic_prompt}
+
+硬性要求：must 术语按自然方式落实，ban 术语绝对不出现；设定/地名/组织
+以材料为准，不得自造；篇幅 200–300 字。只输出正文本身（不要标题、不要解释）。
+
+——世界观锚定——
+{canon_ctx}"""
+
+
+def blind_both_prompt(topic_prompt: str, pack_ctx: str, canon_ctx: str) -> str:
+    """混合臂（v0.13.2）：文风档案 + 世界观锚定同时给——双问题分开计分。"""
+    return f"""请同时遵守下方「文风档案」与「世界观锚定」两份材料。
+
+{topic_prompt}
+
+硬性要求：文风句式/对话/收尾按档案执行；世界观术语与设定按锚定材料落实
+（must 落实、ban 不出现、不自造）；篇幅 200–300 字。只输出正文本身
+（不要标题、不要解释）。
+
+——文风档案——
+{pack_ctx}
+
+——世界观锚定——
+{canon_ctx}"""
+
+
 def blind_plain_prompt(topic_prompt: str) -> str:
     return f"""{topic_prompt}
 
