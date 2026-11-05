@@ -2,17 +2,21 @@
 {% block title %}连载管理台{% endblock %}
 {% block main %}
 <style>
-  .serial-grid{display:grid;grid-template-columns:320px minmax(0,1fr) 360px;gap:14px;align-items:start}
-  @media (max-width:1180px){.serial-grid{grid-template-columns:1fr}}
+  .serial-grid{display:grid;grid-template-columns:280px minmax(0,1fr) 380px;gap:14px;align-items:start}
+  @media (max-width:1360px){.serial-grid{grid-template-columns:260px minmax(0,1fr)};#mgmt_sidebar{grid-column:1/-1}}
+  @media (max-width:980px){.serial-grid{grid-template-columns:1fr}}
+  #mgmt_sidebar{display:flex;flex-direction:column;gap:14px}
+  @media (min-width:1361px){ #mgmt_sidebar{position:sticky;top:12px;max-height:calc(100vh - 30px);overflow:auto} }
   .trow{display:flex;gap:6px;align-items:center;padding:2px 0;font-size:13px;border-bottom:1px dashed var(--panel2)}
   .trow .nm{cursor:pointer;flex:0 0 auto}
   .trow .src{color:var(--muted);font-size:11.5px;flex:1;text-align:right}
   .trow.ig{opacity:.45}
   .trow a{margin-left:4px}
+  #genflow{display:flex;flex-direction:column;gap:14px}
 </style>
 <h1>连载管理台</h1>
 <p class="meta">流程：开弧 → 图纸确认 → 手写探针章（前 2 章）→ 量产连跑中段 → 弧末漂移网 → 交接汇总。
-左栏=约束口（规范层档案+项目文件树），中栏=本章工作流，右栏=运行态（预算/记忆/总结卡）。</p>
+左=约束口（规范层档案），中=本章工作流（装配→生成→交付），右=管理侧栏（文件树/预算/总结卡/记忆）。</p>
 
 <div class="panel genrow">
   <label>项目 <select id="project" onchange="switchProject()"></select></label>
@@ -28,36 +32,28 @@
 <div id="arctools" class="panel" style="display:none"></div>
 
 <div class="serial-grid">
-<!-- 左栏：约束口 + 项目文件树 -->
+<!-- 左栏：约束口 -->
 <div>
   <div class="panel">
     <h3 style="margin-top:0">约束口·规范层</h3>
     <p class="meta">规范层工件在此可见；编辑走档案编辑器（JSON 校验+乐观锁在那里）。
     正文与规范层冲突 = 停写上报，不许圆稿。</p>
+    <ul class="meta" style="padding-left:18px;line-height:1.9">
+      <li>卷纲与弧结构 —— outline.md（开新弧向导维护）</li>
+      <li>硬数字表 —— bible/硬数字表.md（数字唯一口径）</li>
+      <li>项目宪法 —— 00_项目宪法.md（条款即执法）</li>
+      <li>写作防线 —— 00_写作防线.md（G0-G4 闸门）</li>
+      <li>人物/世界观/专名表 —— bible/（names 含状态与禁语）</li>
+    </ul>
     <div class="genrow">
       <a class="btn ghost" href="/app/bible">编辑档案</a>
-      <button class="btn ghost" onclick="loadTree('')">树回根目录</button>
-      <button class="btn ghost" onclick="openFolder()">资源管理器</button>
-    </div>
-  </div>
-  <div class="panel">
-    <h3 style="margin-top:0">项目文件树</h3>
-    <div id="tree_crumb" class="meta"></div>
-    <div id="tree" style="max-height:430px;overflow:auto"></div>
-    <div id="fileview" style="display:none">
-      <h4 id="fv_title" style="margin:6px 0"></h4>
-      <pre id="fv_text" class="meta" style="white-space:pre-wrap;max-height:300px;overflow:auto"></pre>
-      <div class="genrow">
-        <button class="btn ghost" onclick="downloadFile()">下载原文件</button>
-        <button class="btn ghost" onclick="$('fileview').style.display='none'">收起</button>
-        <span id="fv_out" class="meta"></span>
-      </div>
+      <button class="btn ghost" onclick="loadG0()">刷新本章简报</button>
     </div>
   </div>
 </div>
 
 <!-- 中栏：本章工作流（ID 与单章页同源，复用 creation.js） -->
-<div>
+<div id="genflow">
   <div class="panel">
     <label>风格包 <select id="pack" onchange="loadPresets()"></select></label>
     <label>章节号 <input id="chapter_no" type="number" value="1" style="width:80px" onchange="loadG0()"></label>
@@ -90,35 +86,51 @@
   <div id="step_beats" style="display:none">
     <h2>第二级 · 拍子表</h2>
     <div class="panel" id="beats"></div>
-    <p class="meta">拍子确认后 → 右栏生成正文。</p>
   </div>
+
+  <aside class="panel">
+    <h2 style="margin-top:0">生成现场</h2>
+    <div class="stagebar" id="stagebar"></div>
+    <p class="meta" id="genmeta">模型：-｜目标正文 ≈ - 字</p>
+    <div class="genrow">
+      <label>调子声明 <input id="tone_note" list="tone_list" style="width:170px" placeholder="从建议选或自填"></label>
+      <datalist id="tone_list"></datalist>
+      <label>原作锚点 <input id="canon_anchor" list="anchor_list" style="width:200px" placeholder="从建议选或自填"></label>
+      <datalist id="anchor_list"></datalist>
+      <label>稿数 <select id="n_drafts"><option>1</option><option>2</option><option>3</option></select></label>
+      <label><input type="checkbox" id="use_stream" checked> 流式</label>
+    </div>
+    <div class="genrow">
+      <button class="btn" id="btn_generate" disabled onclick="doGenerate()">生成正文</button>
+      <span id="gen_out" class="meta"></span>
+    </div>
+    <div id="drafts"></div>
+    <div class="panel" id="savebox" style="display:none">
+      <label>采用稿 <select id="pick"></select></label>
+      <button class="btn" onclick="doSave()">确认交付（落盘+拆账+探针验收）</button>
+      <button class="btn ghost" onclick="doExport()">导出合并 txt</button>
+      <span id="save_out" class="meta"></span>
+    </div>
+  </aside>
 </div>
 
-<!-- 右栏：运行态 -->
-<aside class="panel">
-  <h2 style="margin-top:0">生成现场</h2>
-  <div class="stagebar" id="stagebar"></div>
-  <p class="meta" id="genmeta">模型：-｜目标正文 ≈ - 字</p>
-  <div class="genrow">
-    <label>调子声明 <input id="tone_note" list="tone_list" style="width:170px" placeholder="从建议选或自填"></label>
-    <datalist id="tone_list"></datalist>
-    <label>原作锚点 <input id="canon_anchor" list="anchor_list" style="width:200px" placeholder="从建议选或自填"></label>
-    <datalist id="anchor_list"></datalist>
-    <label>稿数 <select id="n_drafts"><option>1</option><option>2</option><option>3</option></select></label>
-    <label><input type="checkbox" id="use_stream" checked> 流式</label>
-  </div>
-  <div class="genrow">
-    <button class="btn" id="btn_generate" disabled onclick="doGenerate()">生成正文</button>
-    <span id="gen_out" class="meta"></span>
+<!-- 右栏：管理侧栏（文件树/预算/总结卡/记忆） -->
+<aside id="mgmt_sidebar">
+  <div class="panel">
+    <h3 style="margin-top:0">项目文件树</h3>
+    <div id="tree_crumb" class="meta"></div>
+    <div id="tree" style="max-height:300px;overflow:auto"></div>
+    <div id="fileview" style="display:none">
+      <h4 id="fv_title" style="margin:6px 0"></h4>
+      <pre id="fv_text" class="meta" style="white-space:pre-wrap;max-height:220px;overflow:auto"></pre>
+      <div class="genrow">
+        <button class="btn ghost" onclick="downloadFile()">下载原文件</button>
+        <button class="btn ghost" onclick="document.getElementById('fileview').style.display='none'">收起</button>
+        <span id="fv_out" class="meta"></span>
+      </div>
+    </div>
   </div>
   <div id="budgetbox" class="panel" style="display:none"></div>
-  <div id="drafts"></div>
-  <div class="panel" id="savebox" style="display:none">
-    <label>采用稿 <select id="pick"></select></label>
-    <button class="btn" onclick="doSave()">确认交付（落盘+拆账+探针验收）</button>
-    <button class="btn ghost" onclick="doExport()">导出合并 txt</button>
-    <span id="save_out" class="meta"></span>
-  </div>
   <div class="panel" id="sumcard" style="display:none">
     <h3 style="margin:4px 0">本章总结卡</h3>
     <div id="sumcard_body"></div>
@@ -134,8 +146,9 @@
 <script src="/static/creation.js?v={{ version or '?' }}"></script>
 <script>
 // ---- 连载台专有：项目文件树（只读 + 复用既有执法端点 + OS 逃生门）----
+// 注意：creation.js 已定义全局 $ 与 esc——此处不再重复声明（重复 const 会
+// 让整个内联块 SyntaxError 一行不执行——0.13.0 的"文件树空白"事故根因）。
 let curSub = '';
-const esc = s => (s || '').replace(/</g, '&lt;').replace(/"/g, '&quot;');
 let curFile = '';
 async function loadTree(sub) {
   curSub = sub || '';
@@ -149,9 +162,9 @@ async function loadTree(sub) {
         ? `<span class="nm" onclick="loadTree('${esc(e.rel)}')">📁 ${esc(e.name)}/</span>`
         : `<span class="nm" onclick="previewFile('${esc(e.rel)}')">📄 ${esc(e.name)}</span>`;
       const acts = [];
-      if (!e.dir && !e.binary) acts.push(`<a href="javascript:void(0)" onclick="previewFile('${esc(e.rel)}')">预览</a>`);
+      if (!e.dir) acts.push(`<a href="javascript:void(0)" onclick="previewFile('${esc(e.rel)}')">预览</a>`);
       if (e.rel.startsWith('manuscript/') && e.rel.endsWith('.md')) {
-        acts.push(`<a href="javascript:void(0)" onclick="renameCh('${esc(e.name)}','')">改名</a>`);
+        acts.push(`<a href="javascript:void(0)" onclick="renameCh('${esc(e.name)}')">改名</a>`);
         acts.push(`<a href="javascript:void(0)" onclick="deleteCh('${esc(e.name)}')">删除</a>`);
       }
       if (!e.dir) acts.push(`<a href="/app/api/serial/download?project=${encodeURIComponent($('project').value)}&path=${encodeURIComponent(e.rel)}">下载</a>`);
@@ -170,7 +183,6 @@ async function previewFile(rel) {
       + `｜${(d.size / 1024).toFixed(1)}k` + (d.binary ? '｜二进制文件（只可下载）' : '');
     $('fv_text').textContent = d.binary ? '（二进制）' : d.text
       + (d.truncated ? '\n…（已截断，全文用「下载原文件」）' : '');
-    $('fileview').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   } catch (e) { toast(e.message, 'bad'); }
 }
 function downloadFile() {
@@ -184,8 +196,8 @@ async function openFolder() {
     toast('已在资源管理器打开：' + r.path, 'good');
   } catch (e) { toast(e.message, 'bad'); }
 }
-async function renameCh(file, old) {
-  const t = prompt('新的章节题（章号保留）：', old || file.replace(/^\d+-/, '').replace(/\.md$/, ''));
+async function renameCh(file) {
+  const t = prompt('新的章节题（章号保留）：', file.replace(/^\d+-/, '').replace(/\.md$/, ''));
   if (t === null || !t.trim()) return;
   try {
     const r = await post('/app/api/history/chapter_rename',
@@ -203,8 +215,12 @@ async function deleteCh(file) {
     loadTree(curSub);
   } catch (e) { toast(e.message, 'bad'); }
 }
-// 项目切换后刷新树（creation.js 的 switchProject 已跑完自身职责）
+// 项目切换后刷新树与本章简报（creation.js 的 switchProject 跑完后触发）
 document.getElementById('project').addEventListener('change', () => loadTree(''));
-loadTree('');
+// 初始等 creation.js 的 init() 把项目下拉填好再刷树（轮询其非空，最多 3s）
+(function waitProjects(n) {
+  if ($('project').value || n > 30) loadTree('');
+  else setTimeout(() => waitProjects(n + 1), 100);
+})(0);
 </script>
 {% endblock %}

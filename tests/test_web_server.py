@@ -1525,6 +1525,11 @@ class TestWebServer(unittest.TestCase):
         for mark in ("项目文件树", "step_g0", "sumcard", "budgetbox",
                      "serial-grid", "/static/creation.js"):
             self.assertIn(mark, pg.text)
+        # 0.13.3 回归（文件树空白事故）：内联脚本不得重复声明 creation.js
+        # 的全局 const（重复 const = 整块 SyntaxError 一行不执行）
+        serial_html = (S / "web" / "templates" / "serial.html").read_text(encoding="utf-8")
+        self.assertNotIn("const esc", serial_html)
+        self.assertNotIn("const $", serial_html)
         # 树：顶层目录 + 来源标注
         t = self.client.get("/app/api/serial/tree",
                             params={"project": "测试项目"}).json()

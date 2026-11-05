@@ -334,15 +334,15 @@
     "hits": 0,
     "total": 2,
     "tracks": {
-      "style": {
-        "wins": 0,
-        "n": 2,
-        "rate": 0.0
-      },
       "canon": {
         "wins": 2,
         "n": 2,
         "rate": 1.0
+      },
+      "style": {
+        "wins": 0,
+        "n": 2,
+        "rate": 0.0
       },
       "plain": {
         "wins": 0,
