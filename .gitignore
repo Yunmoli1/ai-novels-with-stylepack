@@ -38,3 +38,8 @@ stylepacks/*/tests/blind-session.json
 web/config.local.json
 !web/requirements-web.txt
 !scripts/ai_cliche_words.txt
+
+# 调试残留
+_s*.js
+_tmp*.js
+_tmp.js
