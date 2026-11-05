@@ -4,6 +4,8 @@ const S = { assembly: null, session_id: '', chosen: null, beats: [],
             batchNo: 0, batchStart: 0, projects: [],
             g0: null, g0info: null, g0Skip: false };
 const STAGES = ['装配', '立意', '拍子', '生成', '门禁', '交付'];
+// v0.13.1 分家：create=单章快写 / serial=连载管理台——长篇件只在 serial 激活
+const PAGE = document.body.dataset.page || 'create';
 const $ = id => document.getElementById(id);
 const esc = s => (s || '').replace(/</g, '&lt;').replace(/"/g, '&quot;');
 async function post(url, body) {
@@ -62,6 +64,7 @@ async function init() {
   S.projects = d.projects || [];
   $('project').innerHTML = d.projects.map(p => `<option value="${p.name}">${p.name}${p.pinned ? '（钉扎：' + p.pinned.pack + ' v' + p.pinned.version + '）' : ''}</option>`).join('');
   syncArcBtn();
+  maybeRedirectLongform();
   S.packVersions = {};
   (d.packs || []).forEach(p => S.packVersions[p.name] = p.version || '');
   $('pack').innerHTML = d.packs.map(p => `<option value="${p.name}">${p.name}</option>`).join('');
@@ -117,7 +120,17 @@ async function newProject() {
     renderOnboard(d);
   } catch (e) { toast(e.message, 'bad'); }
 }
+function maybeRedirectLongform() {
+  // v0.13.1 分家：单章页遇到长篇项目 → 送连载台（约束口/预算/连跑都在那）
+  if (PAGE !== 'create') return;
+  const cur = (S.projects || []).find(p => p.name === $('project').value);
+  if (cur && cur.longform) {
+    toast('「' + cur.name + '」是长篇项目——已为你转到连载台', 'bad');
+    location.href = '/app/serial';
+  }
+}
 function syncArcBtn() {
+  if (!$('btn_arc')) return;  // 单章页无长篇工具条（0.13.1 摘除）
   const cur = (S.projects || []).find(p => p.name === $('project').value);
   const lf = !!(cur && cur.longform);
   $('btn_arc').style.display = lf ? '' : 'none';
@@ -159,6 +172,7 @@ async function newArc() {
 async function switchProject() {
   S.activeSlot = null;
   syncArcBtn();
+  maybeRedirectLongform();
   $('title').value = ''; $('keywords').value = '';  // 新项目新章节：清残留
   $('step_g0').style.display = 'none';
   S.g0info = null; S.g0 = null; S.g0Skip = false;
@@ -329,7 +343,7 @@ const G0_FIELDS = [['anchor', '原作锚点'], ['hero_state', '主角状态'],
 async function loadG0() {
   S.g0 = null; S.g0info = null; S.g0Skip = false;
   S.bstate = null; S.overBudget = false; S.allowUnbilled = false;
-  $('step_g0').style.display = 'none';
+  if (PAGE !== 'serial' || !$('step_g0')) return;  // 单章快写：无 G0/预算/图纸（分家）
   if (!$('project').value) return;
   try {
     const d = await (await fetch('/app/api/longform/g0?project='
@@ -405,7 +419,8 @@ function budgetBlocked() {
 }
 function renderBudget() {
   const b = S.bstate, box = $('budgetbox');
-  if (!S.g0info || !b) { if (box) box.style.display = 'none'; return; }
+  if (!box) return;  // 单章页无预算钱包（0.13.1 摘除）
+  if (!S.g0info || !b) { box.style.display = 'none'; return; }
   const k = n => Math.round((n || 0) / 1000);
   const color = b.state === 'halt' ? 'var(--bad)' : b.state === 'warning' ? 'var(--warn,#c80)' : 'var(--good)';
   const icon = b.state === 'halt' ? '⛔ 止损闸' : b.state === 'warning' ? '⚠ 预警闸' : '✓';

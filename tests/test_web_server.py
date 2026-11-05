@@ -1576,6 +1576,24 @@ class TestWebServer(unittest.TestCase):
             self.assertEqual(bad.status_code, 400)
             m2.assert_not_called()
 
+    def test_single_page_slimmed(self):
+        """v0.13.1 分家第二半：单章页摘除全部长篇件（按钮/面板），长篇项目
+        由前端自动跳转连载台；连载台保留全部长篇件。"""
+        cr = self.client.get("/app/create").text
+        for gone in ("btn_arc", "btn_net", "btn_ho", "btn_batch",
+                     'id="step_g0"', 'id="arctools"', 'id="budgetbox"'):
+            self.assertNotIn(gone, cr, gone)
+        self.assertIn("单章快写", cr)
+        self.assertIn('data-page="create"', cr)
+        js = self.client.get("/static/creation.js").text
+        self.assertIn("maybeRedirectLongform", js)
+        self.assertIn("PAGE !== 'serial'", js)
+        sr = self.client.get("/app/serial").text
+        for kept in ("btn_arc", "btn_batch", 'id="step_g0"',
+                     'id="budgetbox"', 'id="arctools"'):
+            self.assertIn(kept, sr, kept)
+        self.assertIn('data-page="serial"', sr)
+
     def test_numbers_check_script(self):
         """v0.11.1 B-3：数字对照脚本三分类（口径缺失/表外分级/豁免/约略）+
         --all 回扫 + 中文数字解析单元。"""

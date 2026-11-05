@@ -22,7 +22,8 @@
   <h3 style="margin-top:0">开始引导（四步走完即可创作）</h3>
   <div id="ob_steps"></div>
 </div>
-<p class="meta">状态机：装配预览 → 立意确认 → 拍子表 → 生成（右侧栏，流式逐字）→ 三道门 → 确认交付。fp_check/borrow_check 是 advisory 报告不是门；收尾检查为思想层硬性条目，交付前必看。</p>
+<p class="meta">状态机：装配预览 → 立意确认 → 拍子表 → 生成（右侧栏，流式逐字）→ 三道门 → 确认交付。fp_check/borrow_check 是 advisory 报告不是门；收尾检查为思想层硬性条目，交付前必看。
+本页 = <strong>单章快写</strong>（不背历史、不管约束，上下文当场给）；长篇连载（大纲/世界观/人设/约束口/预算）请用<a href="/app/serial">连载管理台</a>——选择长篇项目会自动跳转。</p>
 
 <div class="panel">
   <strong>方案槽</strong>
@@ -36,10 +37,6 @@
 <div class="panel">
   <label>项目 <select id="project" onchange="switchProject()"></select></label>
   <button class="btn ghost" onclick="newProject()">＋ 新建项目</button>
-  <button class="btn ghost" id="btn_arc" style="display:none" onclick="newArc()">开新弧</button>
-  <button class="btn ghost" id="btn_net" style="display:none" onclick="arcNet()">弧末漂移网</button>
-  <button class="btn ghost" id="btn_ho" style="display:none" onclick="handoverDoc()">交接汇总</button>
-  <button class="btn ghost" id="btn_batch" style="display:none" onclick="batchPlan()">量产连跑</button>
   <label>风格包 <select id="pack" onchange="loadPresets()"></select></label>
   <label>章节号 <input id="chapter_no" type="number" value="1" style="width:80px" onchange="loadG0()"></label>
   <label>章节题 <input id="title" style="width:200px" placeholder="如 尸潮前夜"></label>
@@ -57,10 +54,6 @@
 </div>
 
 <div id="assembly" class="panel" style="display:none"></div>
-
-<div id="step_g0" class="panel" style="display:none"></div>
-
-<div id="arctools" class="panel" style="display:none"></div>
 
 <div id="step_outline" style="display:none">
 <h2>第一级 · 立意确认</h2>
@@ -97,7 +90,6 @@
     <button class="btn" id="btn_generate" disabled onclick="doGenerate()">生成正文</button>
     <span id="gen_out" class="meta"></span>
   </div>
-  <div id="budgetbox" class="panel" style="display:none"></div>
   <div id="drafts"></div>
   <div class="panel" id="savebox" style="display:none">
     <label>采用稿 <select id="pick"></select></label>
