@@ -7,6 +7,8 @@
 """
 from __future__ import annotations
 
+import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -137,3 +139,222 @@ def open_folder(body: OpenIn):
     d = _proj(cfg, body.project)
     _open_folder(d)
     return {"ok": True, "path": str(d)}
+
+
+# ---- 约束面板（v0.13.5）：把散在四个文件里的硬标准摆成一张表 ----
+# 人物 = names.json(供给级/别名) × characters.md(状态/禁语)；世界观/人物块 =
+# resident 标记（常驻供给，预算裁剪都不裁）；术语 = canon must/ban；
+# 硬数字 = 硬数字表弧节。所有开关 = 写回原文件（文件协议不变，CLI/agent 同源）。
+RESIDENT_MARK = "<!-- resident -->"
+STATUS_PAT = re.compile(r"状态[:：]\s*(死亡|离场)[（(]第(\d+)章[）)]")
+TABOO_PAT = re.compile(r"禁语[:：]\s*(\S.*)")
+
+
+def _bible(d: Path, name: str) -> str:
+    f = d / "bible" / name
+    return splib.read_text(f)[0] if f.is_file() else ""
+
+
+def _blocks(text: str) -> list[tuple[str, str]]:
+    """## 块切分 → [(标题, 块体)]（只列 ## 块，H1 前导不算——面板语义）。"""
+    if "## " not in text:
+        return []
+    parts = text.split("\n## ")
+    out = []
+    first = parts[0].strip()
+    if first.startswith("## "):
+        out.append((first.splitlines()[0].lstrip("# ").strip(), first))
+    for part in parts[1:]:
+        body = "## " + part
+        out.append((body.splitlines()[0].lstrip("# ").strip(), body))
+    return out
+
+
+def _load_names(d: Path) -> tuple[list[dict], bool]:
+    """→ (people, ok)。names.json 含注释/坏 JSON = 模板态，只读不写。"""
+    f = d / "bible" / "names.json"
+    if not f.is_file():
+        return [], True
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return [], False
+    people = data.get("names", []) if isinstance(data, dict) else data
+    return ([p for p in people if isinstance(p, dict)], True)
+
+
+def _write_names(d: Path, people: list[dict]) -> None:
+    f = d / "bible" / "names.json"
+    f.write_text(json.dumps({"names": people}, ensure_ascii=False, indent=2) + "\n",
+                 encoding="utf-8", newline="\n")
+
+
+def _num_sections(d: Path) -> list[dict]:
+    f = d / "bible" / "硬数字表.md"
+    if not f.is_file():
+        return []
+    text = splib.read_text(f)[0]
+    secs = list(re.finditer(r"^## 弧(\d+)《(.+?)》（第(\d+)-(\d+)章）", text, re.M))
+    out = []
+    for i, m in enumerate(secs):
+        end = secs[i + 1].start() if i + 1 < len(secs) else len(text)
+        rows = [ln for ln in text[m.end():end].splitlines()
+                if ln.strip().startswith("|") and not ln.strip().startswith("|--")
+                and "账目" not in ln]
+        out.append({"no": int(m.group(1)), "title": m.group(2),
+                    "start": int(m.group(3)), "end": int(m.group(4)),
+                    "rows": len(rows)})
+    return out
+
+
+@router.get("/constraints")
+def constraints_view(project: str):
+    """约束面板数据：硬标准一览（人物供给级/状态/禁语、块常驻标记、术语、数字）。"""
+    cfg = appstate.load_config()
+    d = _proj(cfg, project)
+    people, ok = _load_names(d)
+    chars_text = _bible(d, "characters.md")
+    chars_blocks = _blocks(chars_text)
+    status_of, taboo_of = {}, {}
+    for title, body in chars_blocks:
+        m = STATUS_PAT.search(body)
+        if m:
+            status_of[title] = {"state": m.group(1), "ch": int(m.group(2))}
+        t = TABOO_PAT.search(body)
+        if t:
+            taboo_of[title] = [w.strip() for w in t.group(1).split("|") if w.strip()]
+    people_view = []
+    for p in people:
+        nm = str(p.get("name", "")).strip()
+        if nm:
+            people_view.append({"name": nm, "aliases": p.get("aliases", []),
+                                "tier": p.get("tier", "minor"),
+                                "status": status_of.get(nm),
+                                "taboo": taboo_of.get(nm, [])})
+    registered = {p["name"] for p in people_view}
+    ghost = [t for t, _ in chars_blocks if t not in registered]
+
+    def block_view(text: str) -> list[dict]:
+        return [{"title": t, "resident": RESIDENT_MARK in body,
+                 "lines": len(body.splitlines())} for t, body in _blocks(text)]
+
+    terms = None
+    tf = d / "canon" / "canon-terms.json"
+    if tf.is_file():
+        try:
+            t = splib.load_json(tf)
+            terms = {"must": len(t.get("must", [])), "ban": len(t.get("ban", []))}
+        except (OSError, ValueError):
+            terms = None
+    return {"names_ok": ok, "people": people_view, "ghost": ghost,
+            "world_blocks": block_view(_bible(d, "world.md")),
+            "char_blocks": block_view(chars_text),
+            "terms": terms, "numbers": _num_sections(d)}
+
+
+class TierIn(BaseModel):
+    project: str
+    name: str
+    tier: str  # core=常驻（每章必进，预算裁剪都不裁）| minor=命中
+
+
+@router.post("/constraints/tier")
+def set_tier(body: TierIn):
+    if body.tier not in ("core", "minor"):
+        raise HTTPException(400, "tier 须为 core/minor")
+    cfg = appstate.load_config()
+    d = _proj(cfg, body.project)
+    people, ok = _load_names(d)
+    if not ok:
+        raise HTTPException(400, "names.json 解析失败（含注释/坏 JSON）"
+                                 "——请先在档案编辑器修正为纯 JSON")
+    hit = next((p for p in people
+                if str(p.get("name", "")).strip() == body.name), None)
+    if hit:
+        hit["tier"] = body.tier
+    else:
+        people.append({"name": body.name, "tier": body.tier, "aliases": []})
+    _write_names(d, people)
+    return {"ok": True, "name": body.name, "tier": body.tier}
+
+
+class ResidentIn(BaseModel):
+    project: str
+    file: str  # world.md | characters.md
+    title: str
+    resident: bool
+
+
+@router.post("/constraints/resident")
+def set_resident(body: ResidentIn):
+    if body.file not in ("world.md", "characters.md"):
+        raise HTTPException(400, "file 须为 world.md/characters.md")
+    cfg = appstate.load_config()
+    d = _proj(cfg, body.project)
+    f = d / "bible" / body.file
+    if not f.is_file():
+        raise HTTPException(404, f"{body.file} 不存在")
+    text = splib.read_text(f)[0]
+    parts = text.split("\n## ")
+    hit = None
+    for i, part in enumerate(parts):
+        head = part if i == 0 else "## " + part
+        if head.splitlines()[0].lstrip("# ").strip() == body.title:
+            hit = i
+            break
+    if hit is None:
+        raise HTTPException(404, f"块「{body.title}」不存在")
+    body_text = parts[hit] if hit == 0 else "## " + parts[hit]
+    if body.resident and RESIDENT_MARK not in body_text:
+        body_text = body_text.replace("\n", f"\n{RESIDENT_MARK}\n", 1) \
+            if "\n" in body_text else body_text + "\n" + RESIDENT_MARK
+    elif not body.resident:
+        body_text = body_text.replace(RESIDENT_MARK + "\n", "") \
+            .replace(RESIDENT_MARK, "")
+    parts[hit] = body_text[3:] if (hit and body_text.startswith("## ")) \
+        else body_text
+    f.write_text("\n## ".join(parts), encoding="utf-8", newline="\n")
+    return {"ok": True, "file": body.file, "title": body.title,
+            "resident": body.resident}
+
+
+class StatusIn(BaseModel):
+    project: str
+    name: str
+    state: str  # 在场 | 死亡 | 离场
+    ch: int = 0
+
+
+@router.post("/constraints/status")
+def set_status(body: StatusIn):
+    if body.state not in ("在场", "死亡", "离场"):
+        raise HTTPException(400, "state 须为 在场/死亡/离场")
+    if body.state != "在场" and body.ch < 1:
+        raise HTTPException(400, "死亡/离场须给章号")
+    cfg = appstate.load_config()
+    d = _proj(cfg, body.project)
+    f = d / "bible" / "characters.md"
+    if not f.is_file():
+        raise HTTPException(404, "characters.md 不存在")
+    text = splib.read_text(f)[0]
+    parts = text.split("\n## ")
+    hit = None
+    for i, part in enumerate(parts):
+        head = part if i == 0 else "## " + part
+        if head.splitlines()[0].lstrip("# ").strip() == body.name:
+            hit = i
+            break
+    if hit is None:
+        raise HTTPException(404, f"卡面「{body.name}」不存在")
+    body_text = parts[hit] if hit == 0 else "## " + parts[hit]
+    new_line = "状态：在场" if body.state == "在场" \
+        else f"状态：{body.state}（第{body.ch}章）"
+    lines = [ln for ln in body_text.splitlines()
+             if not ln.strip().startswith("状态：")]
+    title_i = next((k for k, ln in enumerate(lines) if ln.startswith("# ")), 0)
+    lines.insert(title_i + 1, new_line)
+    body_text = "\n".join(lines)
+    parts[hit] = body_text[3:] if (hit and body_text.startswith("## ")) \
+        else body_text
+    f.write_text("\n## ".join(parts), encoding="utf-8", newline="\n")
+    return {"ok": True, "name": body.name, "state": body.state, "ch": body.ch}

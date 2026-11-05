@@ -1599,6 +1599,70 @@ class TestWebServer(unittest.TestCase):
             self.assertIn(kept, sr, kept)
         self.assertIn('data-page="serial"', sr)
 
+    def test_constraints_panel(self):
+        """v0.13.5 约束面板：硬标准一览（人物供给级×状态×禁语/块常驻/术语/
+        数字弧节）+ 开关写回原文件（tier/resident/status）+ 模板态保护 +
+        卡面 ghost 提示。"""
+        ws = Path(self.tmp.name) / "ws" / "约束书"
+        (ws / "bible").mkdir(parents=True, exist_ok=True)
+        (ws / "bible" / "names.json").write_text(
+            '{"names": [{"name": "老王", "tier": "minor", "aliases": ["王老"]}]}',
+            encoding="utf-8", newline="\n")
+        (ws / "bible" / "characters.md").write_text(
+            "## 老王\n车夫。状态：死亡（第3章）\n\n## 阿静\n琴师。禁语：没关系\n",
+            encoding="utf-8", newline="\n")
+        (ws / "bible" / "world.md").write_text(
+            "# 世界设定\n\n## 灵能体系\n以血为引。\n\n## 地理·灰港\n雾城。\n",
+            encoding="utf-8", newline="\n")
+        # 一览：人物状态/禁语/别名齐；ghost=阿静；块 resident 默认 false
+        c = self.client.get("/app/api/serial/constraints",
+                            params={"project": "约束书"}).json()
+        self.assertEqual(len(c["people"]), 1)  # names.json 只登记了老王
+        lw = next(p for p in c["people"] if p["name"] == "老王")
+        self.assertEqual(lw["status"]["state"], "死亡")
+        self.assertEqual(lw["status"]["ch"], 3)
+        self.assertEqual(lw["aliases"], ["王老"])
+        self.assertIn("阿静", c["ghost"])
+        self.assertFalse(any(b["resident"] for b in c["world_blocks"]))
+        self.assertEqual(len(c["world_blocks"]), 2)
+        # 开关①：tier → core 写回 names.json；未登记人物自动补条目
+        r = self.client.post("/app/api/serial/constraints/tier", json={
+            "project": "约束书", "name": "老王", "tier": "core"})
+        self.assertEqual(r.status_code, 200)
+        r2 = self.client.post("/app/api/serial/constraints/tier", json={
+            "project": "约束书", "name": "韩梅", "tier": "core"})
+        self.assertEqual(r2.status_code, 200)
+        names = json.loads((ws / "bible" / "names.json")
+                           .read_text(encoding="utf-8"))
+        tiers = {p["name"]: p["tier"] for p in names["names"]}
+        self.assertEqual(tiers["老王"], "core")
+        self.assertEqual(tiers["韩梅"], "core")
+        # 开关②：world 块 resident → 标记写进原文件；再关掉移除
+        self.client.post("/app/api/serial/constraints/resident", json={
+            "project": "约束书", "file": "world.md",
+            "title": "灵能体系", "resident": True})
+        wtext = (ws / "bible" / "world.md").read_text(encoding="utf-8")
+        self.assertIn("<!-- resident -->", wtext)
+        self.client.post("/app/api/serial/constraints/resident", json={
+            "project": "约束书", "file": "world.md",
+            "title": "灵能体系", "resident": False})
+        wtext2 = (ws / "bible" / "world.md").read_text(encoding="utf-8")
+        self.assertNotIn("<!-- resident -->", wtext2)
+        # 开关③：status → 卡面状态行写回（names_check 状态门数据源）
+        self.client.post("/app/api/serial/constraints/status", json={
+            "project": "约束书", "name": "阿静", "state": "死亡", "ch": 5})
+        ctext = (ws / "bible" / "characters.md").read_text(encoding="utf-8")
+        self.assertIn("状态：死亡（第5章）", ctext)
+        self.assertIn("禁语：没关系", ctext)  # 禁语行不被破坏
+        # 非法值 400；模板态 names.json 保护
+        self.assertEqual(self.client.post(
+            "/app/api/serial/constraints/tier",
+            json={"project": "约束书", "name": "x", "tier": "god"}).status_code, 400)
+        self.client.post("/app/api/projects/create", json={"name": "约束轻"})
+        self.assertEqual(self.client.get(
+            "/app/api/serial/constraints",
+            params={"project": "约束轻"}).json()["people"], [])
+
     def test_numbers_check_script(self):
         """v0.11.1 B-3：数字对照脚本三分类（口径缺失/表外分级/豁免/约略）+
         --all 回扫 + 中文数字解析单元。"""

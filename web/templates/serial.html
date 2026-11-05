@@ -36,16 +36,10 @@
 <!-- 左栏：约束口 -->
 <div>
   <div class="panel">
-    <h3 style="margin-top:0">约束口·规范层</h3>
-    <p class="meta">规范层工件在此可见；编辑走档案编辑器（JSON 校验+乐观锁在那里）。
+    <h3 style="margin-top:0">约束口·硬标准面板</h3>
+    <p class="meta">勾选=写回规范层文件（tier:core / resident 标记）——供给与执法即时生效。
     正文与规范层冲突 = 停写上报，不许圆稿。</p>
-    <ul class="meta" style="padding-left:18px;line-height:1.9">
-      <li>卷纲与弧结构 —— outline.md（开新弧向导维护）</li>
-      <li>硬数字表 —— bible/硬数字表.md（数字唯一口径）</li>
-      <li>项目宪法 —— 00_项目宪法.md（条款即执法）</li>
-      <li>写作防线 —— 00_写作防线.md（G0-G4 闸门）</li>
-      <li>人物/世界观/专名表 —— bible/（names 含状态与禁语）</li>
-    </ul>
+    <div id="cpanel"><p class="meta">载入中……</p></div>
     <div class="genrow">
       <a class="btn ghost" href="/app/bible">编辑档案</a>
       <button class="btn ghost" onclick="loadG0()">刷新本章简报</button>
@@ -217,11 +211,70 @@ async function deleteCh(file) {
   } catch (e) { toast(e.message, 'bad'); }
 }
 // 项目切换后刷新树与本章简报（creation.js 的 switchProject 跑完后触发）
-document.getElementById('project').addEventListener('change', () => loadTree(''));
-// 初始等 creation.js 的 init() 把项目下拉填好再刷树（轮询其非空，最多 3s）
+document.getElementById('project').addEventListener('change', () => { loadTree(''); loadConstraints(); });
+// 初始等 creation.js 的 init() 把项目下拉填好再刷树/面板（轮询其非空，最多 3s）
 (function waitProjects(n) {
-  if ($('project').value || n > 30) loadTree('');
+  if ($('project').value || n > 30) { loadTree(''); loadConstraints(); }
   else setTimeout(() => waitProjects(n + 1), 100);
 })(0);
+
+// ---- 约束面板（v0.13.5）：硬标准一览与开关 ----
+async function loadConstraints() {
+  const el = document.getElementById('cpanel');
+  if (!el || !document.getElementById('project').value) return;
+  try {
+    const d = await (await fetch('/app/api/serial/constraints?project='
+      + encodeURIComponent(document.getElementById('project').value))).json();
+    const people = (d.people || []).map(p => {
+      const st = p.status
+        ? `<span style="color:${p.status.state === '在场' ? 'var(--good)' : 'var(--bad)'}">${p.status.state}${p.status.state !== '在场' ? '(第' + p.status.ch + '章)' : ''}</span>`
+        : '<span style="color:var(--muted)">状态未填</span>';
+      const tb = (p.taboo || []).length ? `｜禁语 ${p.taboo.length}` : '';
+      const al = (p.aliases || []).length ? `｜别名 ${p.aliases.length}` : '';
+      return `<div class="trow"><label style="flex:0 0 auto"><input type="checkbox" ${p.tier === 'core' ? 'checked' : ''} onchange="setTier('${esc(p.name)}', this.checked)"> 常驻</label>
+        <span class="nm">${esc(p.name)}</span>
+        <span class="src">${st}${tb}${al}</span></div>`;
+    }).join('') || '<p class="meta">（names.json 还没有人物登记）</p>';
+    const blocks = (list, file) => list.map(b =>
+      `<div class="trow"><label style="flex:0 0 auto"><input type="checkbox" ${b.resident ? 'checked' : ''} onchange="setResident('${file}','${esc(b.title)}', this.checked)"> 常驻</label>
+       <span class="nm" style="cursor:pointer" onclick="previewFile('bible/${file}')">${esc(b.title)}</span>
+       <span class="src">${b.lines} 行</span></div>`).join('')
+      || '<p class="meta">（无块——先在档案编辑器写内容）</p>';
+    const ghost = (d.ghost || []).length
+      ? `<p class="meta" style="color:var(--bad)">⚠ 卡面有而 names.json 未登记：${d.ghost.map(esc).join('、')}——<a href="javascript:void(0)" onclick="registerGhosts()">一键补登记</a></p>` : '';
+    const bad = d.names_ok ? '' : '<p class="meta" style="color:var(--bad)">⚠ names.json 解析失败（模板态/坏 JSON）——开关不可用，先到档案编辑器修正</p>';
+    el.innerHTML = `${bad}
+      <h4 style="margin:6px 0 2px">人物（供给级×状态×禁语）</h4>${people}${ghost}
+      <h4 style="margin:8px 0 2px">世界观块（world.md）</h4>${blocks(d.world_blocks, 'world.md')}
+      <h4 style="margin:8px 0 2px">人物卡块（characters.md）</h4>${blocks(d.char_blocks, 'characters.md')}
+      <p class="meta" style="margin:8px 0 0">术语：${d.terms ? 'must ' + d.terms.must + ' / ban ' + d.terms.ban : '（未钉 canon）'}｜
+      硬数字：${(d.numbers || []).length ? d.numbers.map(s => `弧${s.no} ${s.rows} 条`).join('、') : '（未开弧定账）'}</p>`;
+  } catch (e) { el.innerHTML = '<p class="meta">' + e.message + '</p>'; }
+}
+async function setTier(name, core) {
+  try {
+    await post('/app/api/serial/constraints/tier',
+      { project: document.getElementById('project').value, name,
+        tier: core ? 'core' : 'minor' });
+    toast(name + (core ? ' → 常驻（每章必进）' : ' → 命中'), 'good');
+  } catch (e) { toast(e.message, 'bad'); loadConstraints(); }
+}
+async function setResident(file, title, res) {
+  try {
+    await post('/app/api/serial/constraints/resident',
+      { project: document.getElementById('project').value, file, title, resident: res });
+    toast(title + (res ? ' → 常驻块' : ' → 命中块'), 'good');
+  } catch (e) { toast(e.message, 'bad'); loadConstraints(); }
+}
+async function registerGhosts() {
+  if (!confirm('把卡面人物全部补登记进 names.json（minor，可再勾常驻）？')) return;
+  const d = await (await fetch('/app/api/serial/constraints?project='
+    + encodeURIComponent(document.getElementById('project').value))).json();
+  for (const g of d.ghost || [])
+    await post('/app/api/serial/constraints/tier',
+      { project: document.getElementById('project').value, name: g, tier: 'minor' });
+  toast('已补登记 ' + (d.ghost || []).length + ' 人', 'good');
+  loadConstraints();
+}
 </script>
 {% endblock %}
