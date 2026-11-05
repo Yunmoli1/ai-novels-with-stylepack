@@ -177,9 +177,12 @@ def layout(title: str, body: str, active: str, rel: str = "../") -> str:
         navlink(f"{rel}canon/", "canon 包", "canon"),
         navlink(f"{rel}judging/", "盲测判读台", "judging"),
         '<div class="navsec">工作台</div>',
-        '<a href="/app/config">模型配置</a>',
         '<a href="/app/create">创作</a>',
+        '<a href="/app/serial">连载台</a>',
         '<a href="/app/distill">蒸馏</a>',
+        '<a href="/app/bible">项目档案</a>',
+        '<a href="/app/history">历史与成本</a>',
+        '<a href="/app/config">模型配置</a>',
     ]
     footer = (f'<footer><span>本地工作台 v{ver}</span><span class="sep">|</span>'
               '<span>全部数据与渲染均在本机</span><span class="sep">|</span>'
