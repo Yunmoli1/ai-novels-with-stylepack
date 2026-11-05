@@ -357,6 +357,11 @@
     "hits": 0,
     "total": 2,
     "tracks": {
+      "plain": {
+        "wins": 0,
+        "n": 2,
+        "rate": 0.0
+      },
       "style": {
         "wins": 0,
         "n": 2,
@@ -366,11 +371,6 @@
         "wins": 2,
         "n": 2,
         "rate": 1.0
-      },
-      "plain": {
-        "wins": 0,
-        "n": 2,
-        "rate": 0.0
       }
     },
     "via": "蒸馏台网页盲测"

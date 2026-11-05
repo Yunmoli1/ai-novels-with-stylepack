@@ -15,6 +15,14 @@ function saveCurProject(name) {
 function loadCurProject() {
   try { return localStorage.getItem(PROJECT_KEY) || ''; } catch (e) { return ''; }
 }
+// v0.13.7 约定：页面状态记忆统一走这对 helper（键名 stylepack.<域>.<项>）；
+// 位置类持久不清，失效自动回默认；内容类（半成品）持久+显式清理入口
+function saveState(key, val) {
+  try { localStorage.setItem('stylepack.' + key, val); } catch (e) {}
+}
+function loadState(key) {
+  try { return localStorage.getItem('stylepack.' + key); } catch (e) { return null; }
+}
 const $ = id => document.getElementById(id);
 const esc = s => (s || '').replace(/</g, '&lt;').replace(/"/g, '&quot;');
 async function post(url, body) {

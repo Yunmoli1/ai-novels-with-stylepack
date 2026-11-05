@@ -46,11 +46,16 @@ async function loadFiles() {
     const d = await api('/app/api/bible/files?project=' + encodeURIComponent(p));
     $('file_sel').innerHTML = d.files.map(f => `<option>${esc(f)}</option>`).join('')
       || '<option value="">（空——从模板新建）</option>';
+    // v0.13.7 文件选择记忆：恢复本项目上次打开的文件（列表里仍存在才恢复）
+    let bf = '';
+    try { bf = localStorage.getItem('stylepack.bible_file_' + p) || ''; } catch (e) {}
+    if (bf && d.files.includes(bf)) $('file_sel').value = bf;
     await loadFile();
   } catch (e) { $('out').textContent = e.message; }
 }
 async function loadFile() {
   const f = $('file_sel').value;
+  try { localStorage.setItem('stylepack.bible_file_' + $('project').value, f || ''); } catch (e) {}
   if (!f) { $('ta').value = ''; return; }
   try {
     const d = await api('/app/api/bible/file?project='

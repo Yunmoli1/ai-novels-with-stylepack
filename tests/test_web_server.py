@@ -1546,12 +1546,14 @@ class TestWebServer(unittest.TestCase):
         serial_html = (S / "web" / "templates" / "serial.html").read_text(encoding="utf-8")
         self.assertNotIn("const esc", serial_html)
         self.assertNotIn("const $", serial_html)
-        # v0.13.7 跨页记忆：四页共用项目键 + 连载台树位置键
+        # v0.13.7 跨页记忆：四页共用项目键 + 连载台树位置键 + 档案文件键
         self.assertIn("stylepack.current_project", r.text)
         self.assertIn("stylepack.serial_tree_sub", serial_html)
         for tpl in ("bible.html", "history.html"):
-            self.assertIn("stylepack.current_project",
-                          (S / "web" / "templates" / tpl).read_text(encoding="utf-8"))
+            tpl_text = (S / "web" / "templates" / tpl).read_text(encoding="utf-8")
+            self.assertIn("stylepack.current_project", tpl_text)
+        self.assertIn("stylepack.bible_file_",
+                      (S / "web" / "templates" / "bible.html").read_text(encoding="utf-8"))
         # 树：顶层目录 + 来源标注
         t = self.client.get("/app/api/serial/tree",
                             params={"project": "测试项目"}).json()
