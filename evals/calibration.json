@@ -357,7 +357,7 @@
     "hits": 0,
     "total": 2,
     "tracks": {
-      "plain": {
+      "style": {
         "wins": 0,
         "n": 2,
         "rate": 0.0
@@ -367,7 +367,7 @@
         "n": 2,
         "rate": 1.0
       },
-      "style": {
+      "plain": {
         "wins": 0,
         "n": 2,
         "rate": 0.0

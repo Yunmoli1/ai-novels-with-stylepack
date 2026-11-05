@@ -1547,7 +1547,7 @@ class TestWebServer(unittest.TestCase):
         self.assertNotIn("const esc", serial_html)
         self.assertNotIn("const $", serial_html)
         # v0.13.7 跨页记忆：四页共用项目键 + 连载台树位置键
-        self.assertIn("stylepack.current_project", js)
+        self.assertIn("stylepack.current_project", r.text)
         self.assertIn("stylepack.serial_tree_sub", serial_html)
         for tpl in ("bible.html", "history.html"):
             self.assertIn("stylepack.current_project",
