@@ -137,6 +137,7 @@ function syncArcBtn() {
   $('btn_net').style.display = lf ? '' : 'none';
   $('btn_ho').style.display = lf ? '' : 'none';
   $('btn_batch').style.display = lf ? '' : 'none';
+  if ($('btn_forge')) $('btn_forge').style.display = lf ? '' : 'none';
 }
 async function newArc() {
   const title = prompt('弧名（本弧的张力主题，如：敲门与旧账）：');

@@ -26,11 +26,30 @@
   <button class="btn ghost" id="btn_net" style="display:none" onclick="arcNet()">弧末漂移网</button>
   <button class="btn ghost" id="btn_ho" style="display:none" onclick="handoverDoc()">交接汇总</button>
   <button class="btn ghost" id="btn_batch" style="display:none" onclick="batchPlan()">量产连跑</button>
+  <button class="btn ghost" id="btn_forge" style="display:none" onclick="forgeOpen()">设定工坊</button>
   <a class="btn ghost" href="/app/history">看板/历史</a>
   <a class="btn ghost" href="/app/bible">档案编辑器</a>
 </div>
 
 <div id="arctools" class="panel" style="display:none"></div>
+
+<div id="forgebox" class="panel" style="display:none">
+  <h3 style="margin-top:0">设定工坊（设定版装配——块级生成，人审后落盘直进约束面板）</h3>
+  <label>创作方向（题材/一句话/要求）<textarea id="forge_brief" rows="2" style="width:100%" placeholder="例：灰港雾都的驱灵故事，主角是欠债的年轻巡夜人"></textarea></label>
+  <label>参考资料（可选——同人原作资料/散稿，粘贴此处，生成会取材但不照抄）<textarea id="forge_material" rows="2" style="width:100%"></textarea></label>
+  <div class="genrow">
+    <label>canon 锚定 <select id="forge_canon"><option value="">（不锚定）</option></select></label>
+    <button class="btn ghost" onclick="forgeGen('world')">生成世界观块</button>
+    <button class="btn ghost" onclick="forgeGen('chars')">生成人物卡</button>
+    <button class="btn ghost" onclick="forgeGen('outline')">生成卷纲骨架</button>
+  </div>
+  <div class="genrow" id="forge_tabs" style="margin:6px 0"></div>
+  <div id="forge_cands"></div>
+  <div class="genrow">
+    <button class="btn" onclick="forgeSave()">落盘选中项（同名=替换，其余逐字保留）</button>
+    <span id="forge_out" class="meta"></span>
+  </div>
+</div>
 
 <div class="serial-grid">
 <!-- 左栏：约束口 -->
@@ -275,6 +294,90 @@ async function registerGhosts() {
       { project: document.getElementById('project').value, name: g, tier: 'minor' });
   toast('已补登记 ' + (d.ghost || []).length + ' 人', 'good');
   loadConstraints();
+}
+// ---- 设定工坊（v0.13.6）：设定版装配——块级生成，人审后落盘直进约束面板 ----
+async function forgeOpen() {
+  document.getElementById('forgebox').style.display = '';
+  try {
+    const cps = (await (await fetch('/app/api/canon_packs')).json()).packs || [];
+    document.getElementById('forge_canon').innerHTML = '<option value="">（不锚定）</option>'
+      + cps.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+  } catch (e) {}
+  S.forge = S.forge || { world: [], chars: [], outline: [] };
+  S.forgeTab = S.forgeTab || 'world';
+  renderForgeCands();
+  document.getElementById('forgebox').scrollIntoView({ behavior: 'smooth' });
+}
+function forgeTabSet(t) { S.forgeTab = t; renderForgeCands(); }
+function forgeCandRows() {
+  const kind = S.forgeTab, list = S.forge[kind] || [];
+  const cb = i => `<label style="flex:0 0 auto"><input type="checkbox" class="fc_cb" data-i="${i}" checked> 落盘</label>`;
+  if (kind === 'world')
+    return list.map((b, i) => `<div class="panel" style="margin:4px 0">${cb(i)}
+      <input value="${esc(b.title)}" oninput="S.forge.world[${i}].title=this.value" placeholder="条目名" style="width:180px">
+      <label style="margin-left:8px"><input type="checkbox" ${b.resident ? 'checked' : ''} onchange="S.forge.world[${i}].resident=this.checked"> 常驻</label>
+      <textarea rows="2" style="width:100%;margin-top:4px" oninput="S.forge.world[${i}].body=this.value">${esc(b.body)}</textarea></div>`).join('');
+  if (kind === 'chars')
+    return list.map((p, i) => `<div class="panel" style="margin:4px 0">${cb(i)}
+      <input value="${esc(p.name)}" oninput="S.forge.chars[${i}].name=this.value" placeholder="名字" style="width:120px">
+      <input value="${esc(p.identity)}" oninput="S.forge.chars[${i}].identity=this.value" placeholder="一句话身份" style="width:260px">
+      <label style="margin-left:8px"><input type="checkbox" ${p.tier === 'core' ? 'checked' : ''} onchange="S.forge.chars[${i}].tier=this.checked?'core':'minor'"> 常驻</label>
+      <textarea rows="1" style="width:100%;margin-top:4px" oninput="S.forge.chars[${i}].personality=this.value" placeholder="性格">${esc(p.personality)}</textarea>
+      <input value="${esc(p.quirk)}" oninput="S.forge.chars[${i}].quirk=this.value" placeholder="口头禅/说话习惯" style="width:100%;margin-top:4px">
+      <input value="${esc((p.taboo || []).join('|'))}" oninput="S.forge.chars[${i}].taboo=this.value.split(/[、|]/).map(s=>s.trim()).filter(Boolean)" placeholder="禁语（从不说的话/词，| 分隔）" style="width:100%;margin-top:4px"></div>`).join('');
+  return list.map((v, i) => `<div class="panel" style="margin:4px 0">${cb(i)}
+      <input value="${esc(v.title)}" oninput="S.forge.outline[${i}].title=this.value" placeholder="卷名" style="width:220px">
+      <textarea rows="2" style="width:100%;margin-top:4px" oninput="S.forge.outline[${i}].rule=this.value" placeholder="本卷铁律（；分隔）">${esc(v.rule)}</textarea></div>`).join('');
+}
+function renderForgeCands() {
+  const kind = S.forgeTab;
+  const tabs = [['world', '世界观块'], ['chars', '人物卡'], ['outline', '卷纲骨架']];
+  document.getElementById('forge_tabs').innerHTML = tabs.map(([k, label]) =>
+    `<button class="btn ${kind === k ? '' : 'ghost'}" onclick="forgeTabSet('${k}')">${label}${(S.forge[k] || []).length ? '（' + S.forge[k].length + '）' : ''}</button>`).join('');
+  document.getElementById('forge_cands').innerHTML = forgeCandRows()
+    || '<p class="meta">（点上方生成按钮产出候选——生成不落盘，人审编辑后点「落盘选中项」）</p>';
+}
+async function forgeGen(kind) {
+  const brief = document.getElementById('forge_brief').value.trim();
+  if (!brief) return toast('先填「创作方向」——至少一句话', 'bad');
+  const body = { project: document.getElementById('project').value, brief,
+    canon_pack: document.getElementById('forge_canon').value || null,
+    material: document.getElementById('forge_material').value };
+  if (kind === 'world') body.n = 4;
+  if (kind === 'chars') body.n = 3;
+  if (kind === 'outline') body.n_volumes = 1;
+  document.getElementById('forge_out').textContent = '生成中（单发调用，约半分钟）……';
+  try {
+    const r = await post('/app/api/serial/forge/' + kind, body);
+    S.forge[kind] = r.candidates;
+    S.forgeTab = kind;
+    renderForgeCands();
+    document.getElementById('forge_out').textContent = '候选就绪——勾选并编辑后落盘';
+  } catch (e) { document.getElementById('forge_out').textContent = '失败：' + e.message; }
+}
+async function forgeSave() {
+  const kind = S.forgeTab;
+  const all = S.forge[kind] || [];
+  const picked = all.filter((x, i) => {
+    const cb = document.querySelector(`.fc_cb[data-i="${i}"]`);
+    return cb && cb.checked;
+  });
+  if (!picked.length) return toast('没有勾选任何候选', 'bad');
+  if (!confirm(`落盘 ${picked.length} 项到规范层文件？（同名条目=替换，其余逐字保留）`)) return;
+  const proj = document.getElementById('project').value;
+  try {
+    if (kind === 'world')
+      await post('/app/api/serial/forge/world/save', { project: proj, blocks: picked });
+    if (kind === 'chars')
+      await post('/app/api/serial/forge/characters/save', { project: proj, people: picked });
+    if (kind === 'outline')
+      await post('/app/api/serial/forge/outline/save', { project: proj, volumes: picked });
+    toast('已落盘——约束面板已同步', 'good');
+    loadConstraints();
+    loadTree('');
+    S.forge[kind] = all.filter(x => !picked.includes(x));
+    renderForgeCands();
+  } catch (e) { toast(e.message, 'bad'); }
 }
 </script>
 {% endblock %}

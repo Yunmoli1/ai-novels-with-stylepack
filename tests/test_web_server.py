@@ -103,6 +103,22 @@ class MockHandler(BaseHTTPRequestHandler):
                     "usage": {"prompt_tokens": 100, "completion_tokens": 50}})
 
     def _content_for(self, user_msg):
+        if "设定工坊·世界观块候选" in user_msg:  # v0.13.6 设定工坊
+            return json.dumps({"blocks": [
+                {"title": "灵能体系", "body": "以血为引，三倍反噬。"},
+                {"title": "地理·灰港", "body": "雾锁港口，进出凭灯。"}]},
+                ensure_ascii=False)
+        if "设定工坊·人物卡候选" in user_msg:
+            return json.dumps({"people": [
+                {"name": "林晚", "identity": "驱灵人", "personality": "冷峻寡言",
+                 "quirk": "说话前先摩挲戒指", "taboo": ["开玩笑"], "aliases": []}]},
+                ensure_ascii=False)
+        if "设定工坊·卷纲骨架候选" in user_msg:
+            return json.dumps({"volumes": [{"title": "卷一 灰港迷雾",
+                "rule": "灵能以血为引；不许出现航空母舰",
+                "arcs": [{"title": "敲门与旧账", "anchor": "灰港夜巡",
+                          "tension": "旧案重启", "hooks": "与卷二勾连"}]}]},
+                ensure_ascii=False)
         if "记忆登记项" in user_msg:  # v0.9.0 记忆 digest 提取（judge 路由）
             return json.dumps({"digest": "他钓上会说话的鱼，被绑定。",
                                "changes": [{"entity": "韩天宇",
@@ -1662,6 +1678,74 @@ class TestWebServer(unittest.TestCase):
         self.assertEqual(self.client.get(
             "/app/api/serial/constraints",
             params={"project": "约束轻"}).json()["people"], [])
+
+    def test_forge_settings(self):
+        """v0.13.6 设定工坊：世界观/人物/卷纲候选生成（不落盘）+ 块级合并落盘
+        （同名替换/新块追加，永不整文件覆盖）+ 人物落盘双写（卡面+names.json）
+        + canon 锚定进提示词。"""
+        from unittest.mock import patch
+        import routes_distill
+        self.client.post("/app/api/projects/create", json={
+            "name": "工坊书", "mode": "longform"})
+        ws = Path(self.tmp.name) / "ws" / "工坊书"
+        # 世界观：生成候选（不落盘）→ 落盘合并
+        w = self.client.post("/app/api/serial/forge/world", json={
+            "project": "工坊书", "brief": "灰港雾都的驱灵故事", "n": 2}).json()
+        self.assertEqual(len(w["candidates"]), 2)
+        self.assertNotIn("灵能体系", (ws / "bible" / "world.md")
+                         .read_text(encoding="utf-8"))  # 候选未落盘
+        self.client.post("/app/api/serial/forge/world/save", json={
+            "project": "工坊书",
+            "blocks": [{"title": "灵能体系", "body": "以血为引，三倍反噬。",
+                        "resident": True}]})
+        wtext = (ws / "bible" / "world.md").read_text(encoding="utf-8")
+        self.assertIn("## 灵能体系", wtext) and self.assertIn("<!-- resident -->", wtext)
+        # 同名再落盘 = 替换不重复
+        self.client.post("/app/api/serial/forge/world/save", json={
+            "project": "工坊书",
+            "blocks": [{"title": "灵能体系", "body": "改版：以魂为引。"}]})
+        wtext2 = (ws / "bible" / "world.md").read_text(encoding="utf-8")
+        self.assertEqual(wtext2.count("## 灵能体系"), 1)
+        self.assertIn("以魂为引", wtext2)
+        self.assertNotIn("resident", wtext2)  # 第二次未勾常驻 → 标记移除
+        # 人物：生成 + 落盘双写（卡面 + names.json）
+        c = self.client.post("/app/api/serial/forge/characters", json={
+            "project": "工坊书", "brief": "同上", "n": 1}).json()
+        self.assertEqual(c["candidates"][0]["name"], "林晚")
+        self.client.post("/app/api/serial/forge/characters/save", json={
+            "project": "工坊书",
+            "people": [{**c["candidates"][0], "tier": "core"}]})
+        ctext = (ws / "bible" / "characters.md").read_text(encoding="utf-8")
+        self.assertIn("## 林晚", ctext) and self.assertIn("状态：在场", ctext)
+        self.assertIn("禁语：开玩笑", ctext)
+        names = json.loads((ws / "bible" / "names.json").read_text(encoding="utf-8"))
+        self.assertEqual(names["names"][0]["tier"], "core")
+        # 卷纲：生成 + 落盘
+        o = self.client.post("/app/api/serial/forge/outline", json={
+            "project": "工坊书", "brief": "同上"}).json()
+        self.assertEqual(o["candidates"][0]["title"], "卷一 灰港迷雾")
+        self.client.post("/app/api/serial/forge/outline/save", json={
+            "project": "工坊书",
+            "volumes": [{"title": "卷一 灰港迷雾",
+                         "rule": "灵能以血为引；不许出现航空母舰"}]})
+        otext = (ws / "outline.md").read_text(encoding="utf-8")
+        self.assertIn("## 卷一 灰港迷雾", otext)
+        self.assertIn("铁律：灵能以血为引", otext)
+        # canon 锚定进提示词（patch CANONPACKS）
+        tmp_canon = Path(self.tmp.name) / "canonpacks" / "fakecanon"
+        tmp_canon.mkdir(parents=True)
+        (tmp_canon / "pack.json").write_text("{}", encoding="utf-8")
+        (tmp_canon / "card.md").write_text("世界观卡内容甲", encoding="utf-8")
+        with patch.object(routes_distill, "CANONPACKS",
+                          Path(self.tmp.name) / "canonpacks"):
+            self.client.post("/app/api/serial/forge/world", json={
+                "project": "工坊书", "brief": "续写", "canon_pack": "fakecanon"})
+        self.assertIn("世界观卡内容甲", LAST["user_msg"])
+        self.assertIn("世界观锚定", LAST["user_msg"])
+        # 空原料 400
+        b = self.client.post("/app/api/serial/forge/world", json={
+            "project": "工坊书", "brief": " "})
+        self.assertEqual(b.status_code, 400)
 
     def test_numbers_check_script(self):
         """v0.11.1 B-3：数字对照脚本三分类（口径缺失/表外分级/豁免/约略）+

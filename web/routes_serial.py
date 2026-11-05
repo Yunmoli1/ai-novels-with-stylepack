@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import uuid
 import sys
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from pydantic import BaseModel
 
 import appstate
 import routes_create as _rc
+import routes_distill as _rd
 import splib
 
 router = APIRouter(prefix="/app/api/serial")
@@ -358,3 +360,292 @@ def set_status(body: StatusIn):
         else body_text
     f.write_text("\n## ".join(parts), encoding="utf-8", newline="\n")
     return {"ok": True, "name": body.name, "state": body.state, "ch": body.ch}
+
+
+# ---- 设定工坊（v0.13.6）：世界观/人物/卷纲的块级生成流水线 ----
+# 纪律：每步单发调用 + 产出候选（不落盘）+ 人审编辑 + 显式保存（块级合并，
+# 永不整文件覆盖）。canon 锚定可选（同人模式）；落盘直进约束面板的数据源。
+FORGE_JSON_NOTE = "只输出 JSON 本体（不要解释、不要 markdown 围栏）。"
+
+
+def _canon_ctx_or_400(canon_name: str | None) -> str:
+    if not canon_name:
+        return ""
+    canon_dir = _rd.CANONPACKS / canon_name
+    if not (canon_dir / "pack.json").is_file():
+        raise HTTPException(400, f"canon 包不存在：{canon_name}")
+    return _rd._canon_ctx(canon_dir)
+
+
+def _forge_material(material: str) -> str:
+    return f"\n——参考资料（取材于此，不得照抄原文）——\n{material[:3000]}" \
+        if (material or "").strip() else ""
+
+
+class ForgeWorldIn(BaseModel):
+    project: str
+    brief: str          # 题材/一句话方向/要求
+    canon_pack: str | None = None
+    material: str = ""  # 粘贴的参考资料（同人原作资料/散稿）
+    n: int = 4          # 生成块数 2-6
+
+
+@router.post("/forge/world")
+def forge_world(body: ForgeWorldIn):
+    """世界观块候选生成：产出 {blocks:[{title,body}]}，不落盘——人审后走 /save。"""
+    if not (body.brief or "").strip():
+        raise HTTPException(400, "创作方向为空——至少给一句话")
+    n = max(2, min(6, body.n))
+    canon_ctx = _canon_ctx_or_400(body.canon_pack)
+    canon_note = (f"必须贴合下方「世界观锚定」材料（术语/设定以材料为准，不自造）。\n"
+                  f"——世界观锚定——\n{canon_ctx}\n" if canon_ctx else "")
+    prompt = (f"设定工坊·世界观块候选（{FORGE_JSON_NOTE}）\n\n"
+              f"按以下原料，为这本书生成 {n} 个世界观设定块候选。每块独立成条："
+              f"标题即条目名（2-6 字），正文 2-4 行、一段一条、可执行"
+              f"（力量体系/规则/地理/组织等，不做抒情描述）。\n"
+              f"{canon_note}{_forge_material(body.material)}\n"
+              f"——创作方向——\n{body.brief.strip()}\n\n"
+              f'输出 JSON：{{"blocks": [{{"title": "条目名", "body": "正文"}}]}}')
+    cfg = appstate.load_config()
+    result = _rc._do_model(cfg, "write", f"forge-{uuid.uuid4().hex[:8]}",
+                           prompt, 3000, True, kind="other")
+    blocks = result["json"].get("blocks", [])
+    if not blocks:
+        raise HTTPException(502, "模型未返回世界观块——重试或换模型")
+    return {"candidates": [{"title": str(b.get("title", "")).strip()[:40],
+                            "body": str(b.get("body", "")).strip(),
+                            "resident": False} for b in blocks
+                           if str(b.get("title", "")).strip()],
+            "usage": result}
+
+
+class ForgeSaveWorldIn(BaseModel):
+    project: str
+    blocks: list[dict]  # [{title, body, resident}]
+
+
+@router.post("/forge/world/save")
+def forge_world_save(body: ForgeSaveWorldIn):
+    """候选落盘：块级合并进 world.md（同名替换/新块追加，永不整文件覆盖）。"""
+    if not body.blocks:
+        raise HTTPException(400, "没有选中任何块")
+    cfg = appstate.load_config()
+    d = _proj(cfg, body.project)
+    f = d / "bible" / "world.md"
+    text = splib.read_text(f)[0] if f.is_file() else "# 世界设定\n"
+    parts = text.split("\n## ")
+    saved = 0
+    for b in body.blocks:
+        title = str(b.get("title", "")).strip()
+        body_text = str(b.get("body", "")).strip()
+        if not title or not body_text:
+            continue
+        new_block = f"## {title}\n{body_text}"
+        if b.get("resident"):
+            new_block += "\n" + RESIDENT_MARK
+        hit = None
+        for i, part in enumerate(parts):
+            head = part if i == 0 else "## " + part
+            if head.splitlines()[0].lstrip("# ").strip() == title:
+                hit = i
+                break
+        if hit is not None:
+            parts[hit] = new_block[3:] if hit else new_block
+        else:
+            parts.append(new_block)
+        saved += 1
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("\n## ".join(parts), encoding="utf-8", newline="\n")
+    return {"ok": True, "saved": saved}
+
+
+class ForgeCharsIn(BaseModel):
+    project: str
+    brief: str
+    canon_pack: str | None = None
+    material: str = ""
+    n: int = 3
+
+
+@router.post("/forge/characters")
+def forge_characters(body: ForgeCharsIn):
+    """人物卡候选生成：产出 {people:[{name,identity,personality,quirk,taboo,
+    aliases}]}，不落盘。"""
+    if not (body.brief or "").strip():
+        raise HTTPException(400, "创作方向为空——至少给一句话")
+    n = max(1, min(5, body.n))
+    canon_ctx = _canon_ctx_or_400(body.canon_pack)
+    canon_note = (f"人物必须属于下方「世界观锚定」的世界（名字/身份/能力遵守"
+                  f"材料，术语用 must 列表）。\n——世界观锚定——\n{canon_ctx}\n"
+                  if canon_ctx else "")
+    prompt = (f"设定工坊·人物卡候选（{FORGE_JSON_NOTE}）\n\n"
+              f"按以下原料，为这本书生成 {n} 个主角/主要配角候选。名字须可入"
+              f"专名表（2-3 字、不与常见词撞车）；taboo 是「从不说的话/词」"
+              f"1-2 条（人设执法项）；quirk 是口头禅/说话习惯。\n"
+              f"{canon_note}{_forge_material(body.material)}\n"
+              f"——创作方向——\n{body.brief.strip()}\n\n"
+              f'输出 JSON：{{"people": [{{"name": "名字", "identity": "一句话身份",'
+              f' "personality": "性格", "quirk": "口头禅/说话习惯",'
+              f' "taboo": ["从不说的话"], "aliases": []}}]}}')
+    cfg = appstate.load_config()
+    result = _rc._do_model(cfg, "write", f"forge-{uuid.uuid4().hex[:8]}",
+                           prompt, 3000, True, kind="other")
+    people = result["json"].get("people", [])
+    if not people:
+        raise HTTPException(502, "模型未返回人物候选——重试或换模型")
+    out = []
+    for p in people:
+        name = str(p.get("name", "")).strip()
+        if not name:
+            continue
+        out.append({"name": name[:20],
+                    "identity": str(p.get("identity", "")).strip()[:120],
+                    "personality": str(p.get("personality", "")).strip()[:200],
+                    "quirk": str(p.get("quirk", "")).strip()[:120],
+                    "taboo": [str(t).strip()[:30] for t in (p.get("taboo") or [])
+                              if str(t).strip()][:3],
+                    "aliases": [str(a).strip()[:20] for a in (p.get("aliases") or [])
+                                if str(a).strip()],
+                    "tier": "minor", "resident": False})
+    return {"candidates": out, "usage": result}
+
+
+class ForgeSaveCharsIn(BaseModel):
+    project: str
+    people: list[dict]  # [{name, identity, personality, quirk, taboo, aliases, tier}]
+
+
+@router.post("/forge/characters/save")
+def forge_characters_save(body: ForgeSaveCharsIn):
+    """人物候选落盘：characters.md 块级合并 + names.json 逐条 upsert。"""
+    if not body.people:
+        raise HTTPException(400, "没有选中任何人物")
+    cfg = appstate.load_config()
+    d = _proj(cfg, body.project)
+    cf = d / "bible" / "characters.md"
+    text = splib.read_text(cf)[0] if cf.is_file() else "# 人物\n"
+    parts = text.split("\n## ")
+    nf = d / "bible" / "names.json"
+    people_list, _ = _load_names(d)
+    saved = 0
+    for p in body.people:
+        name = str(p.get("name", "")).strip()
+        if not name:
+            continue
+        identity = str(p.get("identity", "")).strip()
+        personality = str(p.get("personality", "")).strip()
+        quirk = str(p.get("quirk", "")).strip()
+        taboo = [str(t).strip() for t in (p.get("taboo") or []) if str(t).strip()]
+        tier = str(p.get("tier") or "minor")
+        card = f"## {name}\n{identity}。性格：{personality}\n" \
+               f"口头禅/说话习惯：{quirk}\n状态：在场"
+        if taboo:
+            card += "\n禁语：" + "|".join(taboo)
+        hit = None
+        for i, part in enumerate(parts):
+            head = part if i == 0 else "## " + part
+            if head.splitlines()[0].lstrip("# ").strip() == name:
+                hit = i
+                break
+        if hit is not None:
+            parts[hit] = card[3:] if hit else card
+        else:
+            parts.append(card)
+        entry = next((q for q in people_list
+                      if str(q.get("name", "")).strip() == name), None)
+        if entry:
+            entry["tier"] = tier
+            if p.get("aliases"):
+                entry["aliases"] = p["aliases"]
+        else:
+            people_list.append({"name": name, "tier": tier,
+                                "aliases": p.get("aliases") or []})
+        saved += 1
+    cf.parent.mkdir(parents=True, exist_ok=True)
+    cf.write_text("\n## ".join(parts), encoding="utf-8", newline="\n")
+    _write_names(d, people_list)
+    return {"ok": True, "saved": saved}
+
+
+class ForgeOutlineIn(BaseModel):
+    project: str
+    brief: str
+    canon_pack: str | None = None
+    material: str = ""
+    n_volumes: int = 1
+
+
+@router.post("/forge/outline")
+def forge_outline(body: ForgeOutlineIn):
+    """卷纲骨架候选：卷名+铁律+弧草案（弧名/锚点/张力/勾稽点）——章号仍由
+    开弧向导定（数字账开弧定，不自动）。"""
+    if not (body.brief or "").strip():
+        raise HTTPException(400, "创作方向为空——至少给一句话")
+    n_vol = max(1, min(3, body.n_volumes))
+    canon_ctx = _canon_ctx_or_400(body.canon_pack)
+    canon_note = (f"卷纲必须落在下方「世界观锚定」的世界内。\n"
+                  f"——世界观锚定——\n{canon_ctx}\n" if canon_ctx else "")
+    prompt = (f"设定工坊·卷纲骨架候选（{FORGE_JSON_NOTE}）\n\n"
+              f"按以下原料，为这本书生成 {n_vol} 卷的骨架。每卷：卷名、"
+              f"铁律（本卷不可违背的约束 1-3 条，用；分隔）、弧草案 2-3 条"
+              f"（弧名/原作锚点/张力设计/勾稽点——四字段是后续开弧向导的"
+              f"原料，要可判定、不写抒情话）。\n"
+              f"{canon_note}{_forge_material(body.material)}\n"
+              f"——创作方向——\n{body.brief.strip()}\n\n"
+              f'输出 JSON：{{"volumes": [{{"title": "卷一 卷名",'
+              f' "rule": "铁律；铁律", "arcs": [{{"title": "弧名",'
+              f' "anchor": "锚点", "tension": "张力", "hooks": "勾稽点"}}]}}]}}')
+    cfg = appstate.load_config()
+    result = _rc._do_model(cfg, "write", f"forge-{uuid.uuid4().hex[:8]}",
+                           prompt, 3000, True, kind="other")
+    volumes = result["json"].get("volumes", [])
+    if not volumes:
+        raise HTTPException(502, "模型未返回卷纲候选——重试或换模型")
+    out = [{"title": str(v.get("title", "")).strip()[:40],
+            "rule": str(v.get("rule", "")).strip()[:300],
+            "arcs": [{"title": str(a.get("title", "")).strip()[:40],
+                      "anchor": str(a.get("anchor", "")).strip()[:200],
+                      "tension": str(a.get("tension", "")).strip()[:200],
+                      "hooks": str(a.get("hooks", "")).strip()[:200]}
+                     for a in (v.get("arcs") or [])
+                     if str(a.get("title", "")).strip()]}
+           for v in volumes if str(v.get("title", "")).strip()]
+    return {"candidates": out, "usage": result}
+
+
+class ForgeSaveOutlineIn(BaseModel):
+    project: str
+    volumes: list[dict]  # [{title, rule}]
+
+
+@router.post("/forge/outline/save")
+def forge_outline_save(body: ForgeSaveOutlineIn):
+    """卷纲落盘：outline.md 追加/替换 ## 卷节（铁律行）——弧块仍走开弧向导。"""
+    if not body.volumes:
+        raise HTTPException(400, "没有选中任何卷")
+    cfg = appstate.load_config()
+    d = _proj(cfg, body.project)
+    f = d / "outline.md"
+    text = splib.read_text(f)[0] if f.is_file() else "# 卷纲\n"
+    parts = text.split("\n## ")
+    saved = 0
+    for v in body.volumes:
+        title = str(v.get("title", "")).strip()
+        rule = str(v.get("rule", "")).strip()
+        if not title:
+            continue
+        new_sec = f"## {title}\n铁律：{rule or '（待填）'}"
+        hit = None
+        for i, part in enumerate(parts):
+            head = part if i == 0 else "## " + part
+            if head.splitlines()[0].lstrip("# ").strip() == title:
+                hit = i
+                break
+        if hit is not None:
+            parts[hit] = new_sec[3:] if hit else new_sec
+        else:
+            parts.append(new_sec)
+        saved += 1
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("\n## ".join(parts), encoding="utf-8", newline="\n")
+    return {"ok": True, "saved": saved}
