@@ -74,6 +74,12 @@ async function loadProjects() {
   if (!projectsLoaded) {
     const d = await api('/app/api/projects');
     $('project').innerHTML = d.projects.map(p => `<option>${esc(p.name)}</option>`).join('');
+    // v0.13.7 跨页记忆：预选其他页正在看的项目
+    let remembered = '';
+    try { remembered = localStorage.getItem('stylepack.current_project') || ''; } catch (e) {}
+    if (remembered && d.projects.some(p => p.name === remembered))
+      $('project').value = remembered;
+    try { localStorage.setItem('stylepack.current_project', $('project').value || ''); } catch (e) {}
     projectsLoaded = true;
   }
 }

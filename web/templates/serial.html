@@ -164,11 +164,19 @@
 // 让整个内联块 SyntaxError 一行不执行——0.13.0 的"文件树空白"事故根因）。
 let curSub = '';
 let curFile = '';
+const TREE_KEY = 'stylepack.serial_tree_sub';
+function saveTreeSub(sub) {
+  try { localStorage.setItem(TREE_KEY, sub || ''); } catch (e) {}
+}
+function loadTreeSub() {
+  try { return localStorage.getItem(TREE_KEY) || ''; } catch (e) { return ''; }
+}
 async function loadTree(sub) {
   curSub = sub || '';
   try {
     const d = await (await fetch('/app/api/serial/tree?project='
       + encodeURIComponent($('project').value) + '&sub=' + encodeURIComponent(curSub))).json();
+    saveTreeSub(curSub);
     $('tree_crumb').innerHTML = '项目根' + (curSub ? ' / ' + esc(curSub)
       + ` <a href="javascript:void(0)" onclick="loadTree('')">↑ 上一级</a>` : '');
     $('tree').innerHTML = d.entries.map(e => {
@@ -185,7 +193,10 @@ async function loadTree(sub) {
       return `<div class="trow${e.ignored ? ' ig' : ''}" title="${esc(e.source || '')}${e.ignored ? '｜运行态文件（不入库）' : ''}">${nm}
         <span class="src">${esc(e.source || '')}${e.ignored ? ' · 不入库' : ''}｜${(e.size / 1024).toFixed(1)}k</span>${acts.join('')}</div>`;
     }).join('') || '<p class="meta">（空目录）</p>';
-  } catch (e) { $('tree').innerHTML = '<p class="meta">' + e.message + '</p>'; }
+  } catch (e) {
+    $('tree').innerHTML = '<p class="meta">' + e.message + '</p>';
+    if (curSub) { curSub = ''; loadTree(''); }  // 记忆的子目录已失效 → 回根目录
+  }
 }
 async function previewFile(rel) {
   try {
@@ -230,10 +241,11 @@ async function deleteCh(file) {
   } catch (e) { toast(e.message, 'bad'); }
 }
 // 项目切换后刷新树与本章简报（creation.js 的 switchProject 跑完后触发）
-document.getElementById('project').addEventListener('change', () => { loadTree(''); loadConstraints(); });
-// 初始等 creation.js 的 init() 把项目下拉填好再刷树/面板（轮询其非空，最多 3s）
+document.getElementById('project').addEventListener('change', () => { loadTree(loadTreeSub()); loadConstraints(); });
+// 初始等 creation.js 的 init() 把项目下拉填好再刷树/面板（轮询其非空，最多 3s）；
+// 树位置从跨页记忆恢复（切页不再重置）
 (function waitProjects(n) {
-  if ($('project').value || n > 30) { loadTree(''); loadConstraints(); }
+  if ($('project').value || n > 30) { loadTree(loadTreeSub()); loadConstraints(); }
   else setTimeout(() => waitProjects(n + 1), 100);
 })(0);
 

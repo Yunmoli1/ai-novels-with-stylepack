@@ -6,6 +6,15 @@ const S = { assembly: null, session_id: '', chosen: null, beats: [],
 const STAGES = ['装配', '立意', '拍子', '生成', '门禁', '交付'];
 // v0.13.1 分家：create=单章快写 / serial=连载管理台——长篇件只在 serial 激活
 const PAGE = document.body.dataset.page || 'create';
+// v0.13.7 跨页记忆：选中项目随浏览器 localStorage 走（单机工具，无敏感数据）
+// ——修"从连载台点档案编辑器丢项目、切回连载台丢树位置"的跨页失忆
+const PROJECT_KEY = 'stylepack.current_project';
+function saveCurProject(name) {
+  try { localStorage.setItem(PROJECT_KEY, name || ''); } catch (e) {}
+}
+function loadCurProject() {
+  try { return localStorage.getItem(PROJECT_KEY) || ''; } catch (e) { return ''; }
+}
 const $ = id => document.getElementById(id);
 const esc = s => (s || '').replace(/</g, '&lt;').replace(/"/g, '&quot;');
 async function post(url, body) {
@@ -63,6 +72,10 @@ async function init() {
   const d = await (await fetch('/app/api/projects')).json();
   S.projects = d.projects || [];
   $('project').innerHTML = d.projects.map(p => `<option value="${p.name}">${p.name}${p.pinned ? '（钉扎：' + p.pinned.pack + ' v' + p.pinned.version + '）' : ''}</option>`).join('');
+  const remembered = loadCurProject();
+  if (remembered && (d.projects || []).some(p => p.name === remembered))
+    $('project').value = remembered;
+  else saveCurProject($('project').value || '');
   syncArcBtn();
   maybeRedirectLongform();
   S.packVersions = {};
@@ -171,6 +184,7 @@ async function newArc() {
 }
 // ---- 方案槽 ----
 async function switchProject() {
+  saveCurProject($('project').value);
   S.activeSlot = null;
   syncArcBtn();
   maybeRedirectLongform();

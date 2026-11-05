@@ -30,9 +30,16 @@ async function init() {
   const d = await api('/app/api/projects');
   $('project').innerHTML = d.projects.map(p => `<option>${esc(p.name)}</option>`).join('')
     || '<option value="">（先去创作页新建项目）</option>';
+  // v0.13.7 跨页记忆：预选其他页（连载台/创作）正在编辑的项目
+  let remembered = '';
+  try { remembered = localStorage.getItem('stylepack.current_project') || ''; } catch (e) {}
+  if (remembered && d.projects.some(p => p.name === remembered))
+    $('project').value = remembered;
+  else { try { localStorage.setItem('stylepack.current_project', $('project').value || ''); } catch (e) {} }
   await loadFiles();
 }
 async function loadFiles() {
+  try { localStorage.setItem('stylepack.current_project', document.getElementById('project').value); } catch (e) {}
   const p = $('project').value;
   if (!p) return;
   try {
