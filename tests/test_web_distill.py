@@ -460,6 +460,7 @@ class TestDistillStageA(unittest.TestCase):
             encoding="utf-8")
         gi = (S / ".gitignore").read_text(encoding="utf-8")
         self.assertIn("blind-session.json", gi)
+        shutil.rmtree(S / "stylepacks" / "rdpkg", ignore_errors=True)  # 测试产物不留在仓库
 
     def test_blind_canon_arm(self):
         """v0.13.2 canon 臂：臂位校验（缺 canon 包 400）+ 三臂对局（风格/canon/
@@ -525,6 +526,7 @@ class TestDistillStageA(unittest.TestCase):
         self.assertEqual(last["results"]["tracks"]["canon"]["rate"], 1.0)
         self.assertEqual(last["results"]["tracks"]["style"]["wins"], 0)
         self.assertEqual(last["results"]["win_rate"], 0)  # 风格轨独立，不被 canon 污染
+        shutil.rmtree(S / "stylepacks" / "rdcanon", ignore_errors=True)  # 测试产物不留在仓库
 
 
     def test_job_start_and_poll(self):
