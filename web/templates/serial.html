@@ -42,6 +42,7 @@
     <button class="btn ghost" onclick="forgeGen('world')">生成世界观块</button>
     <button class="btn ghost" onclick="forgeGen('chars')">生成人物卡</button>
     <button class="btn ghost" onclick="forgeGen('outline')">生成卷纲骨架</button>
+    <button class="btn ghost" onclick="forgeClear()">清空当前页候选</button>
   </div>
   <div class="genrow" id="forge_tabs" style="margin:6px 0"></div>
   <div id="forge_cands"></div>
@@ -315,31 +316,52 @@ async function forgeOpen() {
     document.getElementById('forge_canon').innerHTML = '<option value="">（不锚定）</option>'
       + cps.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
   } catch (e) {}
-  S.forge = S.forge || { world: [], chars: [], outline: [] };
-  S.forgeTab = S.forgeTab || 'world';
+  if (!S.forge) {  // v0.13.7 记忆约定：未落盘候选也持久（半成品不丢）
+    try { S.forge = JSON.parse(localStorage.getItem('stylepack.forge')
+          || 'null') || { world: [], chars: [], outline: [] }; }
+    catch (e) { S.forge = { world: [], chars: [], outline: [] }; }
+  }
+  let savedTab = 'world';
+  try { savedTab = localStorage.getItem('stylepack.forge.tab') || 'world'; } catch (e) {}
+  S.forgeTab = S.forgeTab || savedTab;
+  if (!S.forge[S.forgeTab]) S.forge[S.forgeTab] = [];
   renderForgeCands();
   document.getElementById('forgebox').scrollIntoView({ behavior: 'smooth' });
 }
-function forgeTabSet(t) { S.forgeTab = t; renderForgeCands(); }
+function saveForgeState() {
+  try {
+    localStorage.setItem('stylepack.forge', JSON.stringify(S.forge));
+    localStorage.setItem('stylepack.forge.tab', S.forgeTab);
+  } catch (e) {}
+}
+function forgeTabSet(t) { S.forgeTab = t; saveForgeState(); renderForgeCands(); }
 function forgeCandRows() {
   const kind = S.forgeTab, list = S.forge[kind] || [];
   const cb = i => `<label style="flex:0 0 auto"><input type="checkbox" class="fc_cb" data-i="${i}" checked> 落盘</label>`;
   if (kind === 'world')
     return list.map((b, i) => `<div class="panel" style="margin:4px 0">${cb(i)}
-      <input value="${esc(b.title)}" oninput="S.forge.world[${i}].title=this.value" placeholder="条目名" style="width:180px">
-      <label style="margin-left:8px"><input type="checkbox" ${b.resident ? 'checked' : ''} onchange="S.forge.world[${i}].resident=this.checked"> 常驻</label>
-      <textarea rows="2" style="width:100%;margin-top:4px" oninput="S.forge.world[${i}].body=this.value">${esc(b.body)}</textarea></div>`).join('');
+      <input value="${esc(b.title)}" oninput="S.forge.world[${i}].title=this.value; saveForgeState()" placeholder="条目名" style="width:180px">
+      <label style="margin-left:8px"><input type="checkbox" ${b.resident ? 'checked' : ''} onchange="S.forge.world[${i}].resident=this.checked; saveForgeState()"> 常驻</label>
+      <textarea rows="2" style="width:100%;margin-top:4px" oninput="S.forge.world[${i}].body=this.value; saveForgeState()">${esc(b.body)}</textarea></div>`).join('');
   if (kind === 'chars')
     return list.map((p, i) => `<div class="panel" style="margin:4px 0">${cb(i)}
-      <input value="${esc(p.name)}" oninput="S.forge.chars[${i}].name=this.value" placeholder="名字" style="width:120px">
-      <input value="${esc(p.identity)}" oninput="S.forge.chars[${i}].identity=this.value" placeholder="一句话身份" style="width:260px">
-      <label style="margin-left:8px"><input type="checkbox" ${p.tier === 'core' ? 'checked' : ''} onchange="S.forge.chars[${i}].tier=this.checked?'core':'minor'"> 常驻</label>
-      <textarea rows="1" style="width:100%;margin-top:4px" oninput="S.forge.chars[${i}].personality=this.value" placeholder="性格">${esc(p.personality)}</textarea>
-      <input value="${esc(p.quirk)}" oninput="S.forge.chars[${i}].quirk=this.value" placeholder="口头禅/说话习惯" style="width:100%;margin-top:4px">
-      <input value="${esc((p.taboo || []).join('|'))}" oninput="S.forge.chars[${i}].taboo=this.value.split(/[、|]/).map(s=>s.trim()).filter(Boolean)" placeholder="禁语（从不说的话/词，| 分隔）" style="width:100%;margin-top:4px"></div>`).join('');
+      <input value="${esc(p.name)}" oninput="S.forge.chars[${i}].name=this.value; saveForgeState()" placeholder="名字" style="width:120px">
+      <input value="${esc(p.identity)}" oninput="S.forge.chars[${i}].identity=this.value; saveForgeState()" placeholder="一句话身份" style="width:260px">
+      <label style="margin-left:8px"><input type="checkbox" ${p.tier === 'core' ? 'checked' : ''} onchange="S.forge.chars[${i}].tier=this.checked?'core':'minor'; saveForgeState()"> 常驻</label>
+      <textarea rows="1" style="width:100%;margin-top:4px" oninput="S.forge.chars[${i}].personality=this.value; saveForgeState()" placeholder="性格">${esc(p.personality)}</textarea>
+      <input value="${esc(p.quirk)}" oninput="S.forge.chars[${i}].quirk=this.value; saveForgeState()" placeholder="口头禅/说话习惯" style="width:100%;margin-top:4px">
+      <input value="${esc((p.taboo || []).join('|'))}" oninput="S.forge.chars[${i}].taboo=this.value.split(/[、|]/).map(s=>s.trim()).filter(Boolean); saveForgeState()" placeholder="禁语（从不说的话/词，| 分隔）" style="width:100%;margin-top:4px"></div>`).join('');
   return list.map((v, i) => `<div class="panel" style="margin:4px 0">${cb(i)}
-      <input value="${esc(v.title)}" oninput="S.forge.outline[${i}].title=this.value" placeholder="卷名" style="width:220px">
-      <textarea rows="2" style="width:100%;margin-top:4px" oninput="S.forge.outline[${i}].rule=this.value" placeholder="本卷铁律（；分隔）">${esc(v.rule)}</textarea></div>`).join('');
+      <input value="${esc(v.title)}" oninput="S.forge.outline[${i}].title=this.value; saveForgeState()" placeholder="卷名" style="width:220px">
+      <textarea rows="2" style="width:100%;margin-top:4px" oninput="S.forge.outline[${i}].rule=this.value; saveForgeState()" placeholder="本卷铁律（；分隔）">${esc(v.rule)}</textarea></div>`).join('');
+}
+function forgeClear() {
+  const kind = S.forgeTab;
+  if (!confirm(`清空「${kind}」页的全部未落盘候选？（已落盘的不受影响；这不可撤销）`)) return;
+  S.forge[kind] = [];
+  saveForgeState();
+  renderForgeCands();
+  toast('已清空（显式清理入口——记忆约定）', 'good');
 }
 function renderForgeCands() {
   const kind = S.forgeTab;
@@ -363,6 +385,7 @@ async function forgeGen(kind) {
     const r = await post('/app/api/serial/forge/' + kind, body);
     S.forge[kind] = r.candidates;
     S.forgeTab = kind;
+    saveForgeState();
     renderForgeCands();
     document.getElementById('forge_out').textContent = '候选就绪——勾选并编辑后落盘';
   } catch (e) { document.getElementById('forge_out').textContent = '失败：' + e.message; }
@@ -388,6 +411,7 @@ async function forgeSave() {
     loadConstraints();
     loadTree('');
     S.forge[kind] = all.filter(x => !picked.includes(x));
+    saveForgeState();
     renderForgeCands();
   } catch (e) { toast(e.message, 'bad'); }
 }

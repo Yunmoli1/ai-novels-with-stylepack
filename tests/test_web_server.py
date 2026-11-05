@@ -1554,6 +1554,10 @@ class TestWebServer(unittest.TestCase):
             self.assertIn("stylepack.current_project", tpl_text)
         self.assertIn("stylepack.bible_file_",
                       (S / "web" / "templates" / "bible.html").read_text(encoding="utf-8"))
+        # v0.13.7 补：蒸馏包键 + 工坊候选持久化键（半成品不丢+显式清空）
+        self.assertIn("stylepack.distill.pack",
+                      (S / "web" / "templates" / "distill.html").read_text(encoding="utf-8"))
+        self.assertIn("stylepack.forge", serial_html)
         # 树：顶层目录 + 来源标注
         t = self.client.get("/app/api/serial/tree",
                             params={"project": "测试项目"}).json()

@@ -277,15 +277,23 @@ async function doFingerprint() {
 async function loadPacks() {
   try {
     const d = await api('/app/api/distill/packs');
+    // v0.13.7 记忆约定：无会话内选择时，恢复上次操作的包（失效自动回默认）
+    if (!S.curPack) {
+      let remembered = '';
+      try { remembered = localStorage.getItem('stylepack.distill.pack') || ''; } catch (e) {}
+      if (remembered && (d.packs || []).includes(remembered)) S.curPack = remembered;
+    }
     $('view_pack').innerHTML = (d.packs || []).map(p =>
       `<option value="${esc(p)}">${esc(p)}${S.curPack === p ? ' ✓' : ''}</option>`).join('')
       || '<option value="">（无包）</option>';
     if (S.curPack) $('view_pack').value = S.curPack;
+    try { localStorage.setItem('stylepack.distill.pack', $('view_pack').value || ''); } catch (e) {}
     loadPack();
   } catch (e) {}
 }
 async function loadPack() {
   const p = $('view_pack').value;
+  try { localStorage.setItem('stylepack.distill.pack', p || ''); } catch (e) {}
   if (!p) { $('pack_view').innerHTML = '<p class="meta">无包</p>'; return; }
   const d = await api('/app/api/distill/pack?pack=' + encodeURIComponent(p));
   S.curPack = d.name;
