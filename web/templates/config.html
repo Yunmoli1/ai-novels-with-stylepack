@@ -17,6 +17,7 @@
 
 <h2>按模块路由</h2>
 <div class="panel" id="routing"></div>
+<p class="meta">思考档（v0.13.8）：选档后自动发探针验供应商收不收这组参数——✓ 记档直发；✗ 记档拒绝，该路由不再发参（运行时被拒也会自动去参出稿并响亮警告，绝不静默）；？未确认不记档。GLM 系只有开/关无档位；未识别主机（中转站）按 OpenAI reasoning_effort 形态探。</p>
 
 <h2>生成与护栏</h2>
 <div class="panel">
@@ -48,20 +49,63 @@ function renderProviders() {
      <button class="btn ghost" onclick="testP('${p.name}')">测试连接</button>
      <button class="btn ghost" onclick="delP(${i})">删除</button></div>`).join('') || '<p class="meta">（尚未配置供应商）</p>';
 }
+const ROUTES = [['write', '写作模型'], ['write_mass', '量产章写作（可选·长篇模式：灌水章走便宜的非思考模型）'], ['judge', '判官模型（建议异源）'], ['critique', '批改模型']];
 function renderRouting() {
-  const routes = [['write', '写作模型'], ['write_mass', '量产章写作（可选·长篇模式：灌水章走便宜的非思考模型）'], ['judge', '判官模型（建议异源）'], ['critique', '批改模型']];
   const hasModels = (cfg.providers || []).some(p => (p.models || []).length);
   const hint = hasModels ? '' :
     '<p class="meta">⚠ 供应商还没有模型列表——点上方供应商卡片里的「测试连接」自动获取（或手动填"模型 ID"后点"添加 / 更新供应商"）。</p>';
-  document.getElementById('routing').innerHTML = hint + routes.map(([k, label]) => {
+  document.getElementById('routing').innerHTML = hint + ROUTES.map(([k, label]) => {
     const cur = (cfg.routing || {})[k] || {};
     const opts = (cfg.providers || []).map(p =>
       (p.models || []).map(m => {
         const sel = cur.provider === p.name && cur.model === m ? 'selected' : '';
         return `<option value="${p.name}||${m}" ${sel}>${p.name} / ${m}</option>`;
       }).join('')).join('');
-    return `<div class="panel">${label}：<select id="route_${k}"><option value="">（未设置）</option>${opts}</select></div>`;
+    // 思考档（v0.13.8）：默认不传（零额外参数）/ 关 / 低 / 中 / 高 / 自定义 JSON
+    const thk = cur.thinking || (cur.thinking_json ? 'custom' : '');
+    const thkOpts = [['', '默认·不传'], ['off', '关思考'], ['low', '低'],
+                     ['medium', '中'], ['high', '高'], ['custom', '自定义 JSON…']]
+      .map(([v, t]) => `<option value="${v}" ${thk === v ? 'selected' : ''}>${t}</option>`).join('');
+    const prov = (cfg.providers || []).find(p => p.name === cur.provider);
+    const sup = (prov && prov.thinking_support) || {};
+    const mark = cur.model && (cur.model in sup)
+      ? (sup[cur.model] ? '<span style="color:var(--good)">✓ 探针/实跑通过</span>'
+                        : '<span style="color:var(--bad)">✗ 已记档拒绝（该路由不再发参）</span>')
+      : '';
+    const jval = cur.thinking_json ? JSON.stringify(cur.thinking_json) : '';
+    return `<div class="panel">${label}：<select id="route_${k}"><option value="">（未设置）</option>${opts}</select>
+      思考档：<select id="think_${k}" onchange="onThink('${k}')">${thkOpts}</select>
+      <input id="thinkjson_${k}" style="width:260px" placeholder='如 {"thinking":{"type":"enabled"}}' value="${jval}">
+      <span id="thinkout_${k}" class="meta">${mark}</span></div>`;
   }).join('');
+}
+async function onThink(k) {
+  const out = document.getElementById('thinkout_' + k);
+  const sel = document.getElementById('route_' + k).value;
+  const thk = document.getElementById('think_' + k).value;
+  const jtxt = document.getElementById('thinkjson_' + k).value.trim();
+  if (!sel) { out.textContent = '（先选模型再探针）'; return; }
+  let custom = null;
+  if (thk === 'custom' || (!thk && jtxt)) {
+    if (!jtxt) { out.textContent = '自定义档：填 JSON 后自动探针'; return; }
+    try { custom = JSON.parse(jtxt); }
+    catch { out.textContent = '✗ JSON 不合法'; return; }
+  }
+  if (!thk && !custom) { out.textContent = ''; return; }
+  const [provider, model] = sel.split('||');
+  out.textContent = '探针中……';
+  const r = await (await fetch('/app/api/config/thinking-probe', { method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ provider, model, level: thk === 'custom' ? '' : thk, custom }) })).json();
+  if (r.ok === undefined) { out.textContent = '✗ ' + (r.detail || '探针失败'); return; }
+  if (r.ok === true) out.textContent = '✓ 支持（已记档）';
+  else if (r.ok === false) out.textContent = '✗ 拒绝（已记档，运行时自动去参）';
+  else out.textContent = '？未确认（网络/其他错，未记档）';
+  const p = (cfg.providers || []).find(p => p.name === provider);
+  if (p && r.ok !== null) {
+    p.thinking_support = p.thinking_support || {};
+    p.thinking_support[model] = r.ok;
+  }
 }
 async function addProvider() {
   const name = document.getElementById('p_name').value.trim();
@@ -95,9 +139,19 @@ async function testP(name) {
 async function saveAll(silent) {
   const g = id => document.getElementById(id).value;
   const routing = {};
-  for (const k of ['write', 'write_mass', 'judge', 'critique']) {
+  for (const [k, label] of ROUTES) {
     const v = document.getElementById('route_' + k).value;
-    if (v) { const [provider, model] = v.split('||'); routing[k] = { provider, model }; }
+    if (!v) continue;
+    const [provider, model] = v.split('||');
+    const entry = { provider, model };
+    const thk = document.getElementById('think_' + k).value;
+    const jtxt = document.getElementById('thinkjson_' + k).value.trim();
+    if (thk && thk !== 'custom') entry.thinking = thk;
+    if (jtxt) {
+      try { entry.thinking_json = JSON.parse(jtxt); }
+      catch { alert(`${label}：自定义思考 JSON 不合法——保存已中止`); return; }
+    }
+    routing[k] = entry;
   }
   const body = { providers: cfg.providers, routing,
     workspace_root: g('ws_root'), context_budget_tokens: +g('budget') || 24000,

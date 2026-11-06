@@ -440,6 +440,15 @@ function budgetBlocked() {
     return true;
   return false;
 }
+// ---- 思考档善后警告（v0.13.8）：服务端记档+浮现，绝不静默；同一条只弹一次
+function showWarnings(ws) {
+  (ws || []).forEach(w => {
+    if (!S.warnShown) S.warnShown = new Set();
+    if (S.warnShown.has(w)) return;
+    S.warnShown.add(w);
+    toast('⚠ ' + w, 'bad');
+  });
+}
 function renderBudget() {
   const b = S.bstate, box = $('budgetbox');
   if (!box) return;  // 单章页无预算钱包（0.13.1 摘除）
@@ -450,6 +459,8 @@ function renderBudget() {
   let html = `<h3 style="margin:4px 0">预算·本章钱包</h3>
     <p class="meta" style="color:${color}">${icon} 本章已烧 ${k(b.spend)}k / 预算 ${k(b.chapter_budget)}k（止损线 ${k(b.halt_line)}k）</p>
     <p class="meta">拆账：生成 ${k(b.breakdown && b.breakdown.gen)}k · 修订 ${k(b.breakdown && b.breakdown.rev)}k · 其他 ${k(b.breakdown && b.breakdown.other)}k${b.ledger_tokens ? ` · 账本历史 ${k(b.ledger_tokens)}k` : ''}</p>`;
+  html += (b.warnings || []).map(w =>
+    `<p class="meta" style="color:var(--warn,#c80)">⚠ ${w}</p>`).join('');
   if (b.state === 'halt')
     html += `<div class="genrow"><a class="btn ghost" href="/app/config">换模型（去配置）</a>
       <button class="btn ghost" onclick="raiseBudget()">调高预算</button>
@@ -1001,11 +1012,13 @@ function onGenEvent(ev, d) {
     const card = $('card_' + f);
     if (card) card.outerHTML = cardHtml(S.drafts[f], f);
     refreshPick(); setStage(4);  // 只换本稿卡片——别稿可能仍在流式
+    showWarnings(d.warnings);
     persistBatches();
   } else if (ev === 'error') {
     $('gen_out').textContent = '失败：' + d.message;
   } else if (ev === 'all_done') {
     if (d.budget) { S.bstate = d.budget; renderBudget(); }
+    showWarnings(d.warnings);
     if (!S.drafts.some(x => x && x.batch === S.batchNo)) return;
     const hot = S.drafts.filter(x => x && x.batch === S.batchNo
                                     && x.usage && x.usage.retries >= 2);

@@ -84,6 +84,68 @@ def resolve_route(cfg: dict, route: str) -> tuple[dict | None, str | None]:
     return None, None
 
 
+# ---- 思考档（v0.13.8）：路由条目可选 thinking=off/low/medium/high + thinking_json。
+# L1 主机映射：认得出的家按自家参数形态发；认不出的主机（中转站常态）走
+# OpenAI reasoning_effort 形态——由 L2 探针验真伪，L3 运行时 400 自动去参兜底。
+# 不选档=零额外参数（错误参数根本不出手）。
+_THINKING_EFFORT = {"off": "minimal", "low": "low", "medium": "medium",
+                    "high": "high"}
+
+
+def thinking_extra(base_url: str, level: str | None,
+                   custom: dict | None = None) -> dict | None:
+    """思考档 → 请求体附加参数。custom（自定义 JSON）显式优先；
+    GLM=thinking.type（无档位只有开关）/ Qwen=enable_thinking /
+    OpenRouter=reasoning.effort / 其余（openai 官方+未识别主机）=reasoning_effort。"""
+    if isinstance(custom, dict) and custom:
+        return dict(custom)
+    if level not in _THINKING_EFFORT:
+        return None
+    host = (base_url or "").lower()
+    if "zhipu" in host or "bigmodel" in host:
+        return {"thinking": {"type": "disabled" if level == "off" else "enabled"}}
+    if "dashscope" in host or "aliyuncs" in host:
+        return {"enable_thinking": level != "off"}
+    if "openrouter" in host:
+        if level == "off":
+            return {"reasoning": {"enabled": False, "exclude": True}}
+        return {"reasoning": {"effort": level}}
+    return {"reasoning_effort": _THINKING_EFFORT[level]}
+
+
+def route_thinking(cfg: dict, route: str) -> dict | None:
+    """routing 条目（thinking/thinking_json）→ 该路由的请求体附加参数。
+    探针/运行时记档为拒绝（thinking_support[model]=False）→ 不再发参，
+    直到用户在配置页重新探针或改档——显式恢复，不静默重试。"""
+    entry = (cfg.get("routing") or {}).get(route)
+    if not isinstance(entry, dict) or not (entry.get("thinking")
+                                           or entry.get("thinking_json")):
+        return None
+    for prov in cfg.get("providers", []):
+        if prov.get("name") == entry.get("provider"):
+            support = prov.get("thinking_support") or {}
+            if support.get(entry.get("model")) is False:
+                return None
+            return thinking_extra(prov.get("base_url", ""),
+                                  entry.get("thinking"), entry.get("thinking_json"))
+    return None
+
+
+def mark_thinking_support(path: Path | None, provider: str, model: str,
+                          ok: bool) -> None:
+    """探针/运行时降级结果记档（providers[i].thinking_support[model]）。
+    独立 load→改→save（不复用请求期 cfg，防陈旧页覆盖）；值未变不落盘。"""
+    cfg = load_config(path)
+    for prov in cfg.get("providers", []):
+        if prov.get("name") == provider:
+            support = prov.setdefault("thinking_support", {})
+            if support.get(model) == ok:
+                return
+            support[model] = ok
+            save_config(cfg, path)
+            return
+
+
 def sanitize_config(cfg: dict) -> dict:
     """对外暴露的配置视图：key 永不出服务端（r4 红线 5）。"""
     out = json.loads(json.dumps({k: v for k, v in cfg.items() if not k.startswith("_")}))

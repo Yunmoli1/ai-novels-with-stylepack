@@ -36,6 +36,7 @@ stylepacks/*/tests/blind-session.json
 
 # 工作台模型配置（含 API key，只存服务端本地）
 web/config.local.json
+web/config.local.json.bak
 !web/requirements-web.txt
 !scripts/ai_cliche_words.txt
 

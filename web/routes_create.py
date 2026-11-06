@@ -178,11 +178,24 @@ def set_config(body: ConfigIn):
         merged.append({"name": p["name"], "base_url": p["base_url"],
                        "api_key": key,
                        "models": p.get("models") if isinstance(p.get("models"), list) else []})
+        # 思考档支持度记档跟随供应商保留（探针/运行时降级结果，v0.13.8）
+        old_sup = old_by_name[p["name"]].get("thinking_support")
+        if isinstance(old_sup, dict):
+            merged[-1]["thinking_support"] = old_sup
     cfg["providers"] = merged
     for p in cfg["providers"]:
         if not isinstance(p.get("models"), list):
             p["models"] = []
-    cfg["routing"] = body.routing or {}
+    clean_routing: dict = {}
+    for k, v in (body.routing or {}).items():
+        if isinstance(v, dict):
+            v = dict(v)
+            if v.get("thinking") not in ("off", "low", "medium", "high"):
+                v.pop("thinking", None)
+            if not isinstance(v.get("thinking_json"), dict):
+                v.pop("thinking_json", None)
+        clean_routing[k] = v
+    cfg["routing"] = clean_routing
     if body.workspace_root:
         cfg["workspace_root"] = body.workspace_root
     cfg["context_budget_tokens"] = body.context_budget_tokens
@@ -209,6 +222,37 @@ def test_connection(body: TestIn):
             except ValueError as exc:
                 return {"ok": False, "error": str(exc)}
     raise HTTPException(404, f"未找到 provider：{body.name}")
+
+
+class ThinkProbeIn(BaseModel):
+    provider: str
+    model: str
+    level: str = ""            # off/low/medium/high；空 + custom = 自定义 JSON 探针
+    custom: dict | None = None
+
+
+@router.post("/config/thinking-probe")
+def thinking_probe(body: ThinkProbeIn):
+    """L2 思考参数探针（v0.13.8）：单发最小请求验供应商收不收这组参数。
+    True/False 记档进 providers.thinking_support（False 后该路由不再发参，
+    显式重新探针才恢复）；None=网络/其他错，不记档不冤枉。"""
+    cfg = appstate.load_config()
+    prov = next((p for p in cfg.get("providers", [])
+                 if p.get("name") == body.provider), None)
+    if not prov:
+        raise HTTPException(404, f"未找到 provider：{body.provider}")
+    if not body.level and not body.custom:
+        raise HTTPException(400, "level 与 custom 皆为空——无参数可探")
+    extra = appstate.thinking_extra(prov.get("base_url", ""),
+                                    body.level or None, body.custom)
+    if not extra:
+        raise HTTPException(400, "无效思考档——off/low/medium/high 或自定义 JSON")
+    r = model_client.probe_extra(prov["base_url"], prov.get("api_key"),
+                                 body.model, extra)
+    if r["supported"] is not None:
+        appstate.mark_thinking_support(None, body.provider, body.model,
+                                       bool(r["supported"]))
+    return {"ok": r["supported"], "detail": r["detail"], "extra": extra}
 
 
 # ---- 项目/包 ----
@@ -486,18 +530,50 @@ def _session_id(body) -> str:
     return body.session_id or uuid.uuid4().hex[:12]
 
 
+def _thinking_aftermath(cfg: dict, route: str, model: str, sid: str,
+                        result: dict) -> None:
+    """思考档善后（v0.13.8）：L3 运行时降级记档 + 警告入会话（绝不静默——
+    用户选关思考是为省成本，静默回退=成本悄悄爆炸）；usage 交叉验证参数真伪。
+    警告存 _sessions[sid]["warnings"]，经预算状态/draft_done/save 浮现。"""
+    entry = (cfg.get("routing") or {}).get(route) or {}
+    level = entry.get("thinking")
+    warns: list[str] = []
+    dropped = result.get("thinking_fallback") or []
+    if dropped:
+        appstate.mark_thinking_support(None, entry.get("provider", ""), model, False)
+        warns.append(f"思考参数被供应商拒绝（{','.join(dropped)}）——本次已自动"
+                     "去参出稿并记档：该模型不支持此思考档，请到模型配置页调整")
+    rt = result.get("reasoning_tokens")
+    if rt is not None and level:
+        if level == "off" and rt > 0:
+            warns.append(f"思考档=关但 reasoning_tokens={rt}——参数疑似未生效"
+                         "（供应商可能静默忽略），成本仍按思考计")
+        elif level in ("low", "medium", "high") and rt == 0:
+            warns.append(f"思考档={level}但 reasoning_tokens=0——参数疑似未生效")
+    if warns:
+        s = _sessions.setdefault(sid, {"tokens": 0, "calls": 0,
+                                       "gen": 0, "rev": 0, "other": 0})
+        s.setdefault("warnings", []).extend(warns)
+
+
+def _session_warnings(sid: str) -> list[str]:
+    return list(_sessions.get(sid, {}).get("warnings") or [])
+
+
 def _do_model(cfg: dict, route: str, session_id: str, prompt: str,
               max_tokens: int, json_mode: bool, kind: str = "other"):
     base, key, model = _resolve_model(cfg, route)
+    extra = appstate.route_thinking(cfg, route)
     _guard(cfg, session_id, int(max_tokens * 1.5))
     try:
         result = model_client.chat(base, key, model,
                                    [{"role": "system", "content": creation.SYSTEM},
                                     {"role": "user", "content": prompt}],
                                    temperature=cfg.get("temperature", 0.8),
-                                   max_tokens=max_tokens)
+                                   max_tokens=max_tokens, extra=extra)
     except ValueError as exc:  # 已 sanitize，可直接示人
         raise HTTPException(502, str(exc))
+    _thinking_aftermath(cfg, route, model, session_id, result)
     _record_usage(session_id, result, kind)
     if not result["text"].strip():  # 双保险：chat() 已拦，此处兜底
         raise HTTPException(502, "模型返回空正文（上游未拦住）——请重试或检查模型配置")
@@ -660,6 +736,7 @@ def do_generate(body: GenerateIn):
                            "ai_cliche": aic, "numbers_check": nums,
                            "names_check": nms})
     return {"session_id": sid, "drafts": drafts,
+            "warnings": _session_warnings(sid),
             "assembly_preview": assembly["items"],
             "assembly_tokens": assembly["total_est_tokens"],
             "budget": _budget_state(project_dir, body.chapter_no, sid)}
@@ -682,6 +759,7 @@ def _stream_one_draft(cfg: dict, sid: str, prompt: str, budget: int,
     交付前数字对照（advisory 报不拦），None=轻量项目跳过。
     route（v0.11.2 C-4）：量产章走 write_mass（路由解析在 _prep_generate）。"""
     base, key, model = _resolve_model(cfg, route)
+    think = appstate.route_thinking(cfg, route)
     messages = [{"role": "system", "content": creation.SYSTEM},
                 {"role": "user", "content": prompt}]
     _guard(cfg, sid, int(budget * 1.5))
@@ -691,7 +769,7 @@ def _stream_one_draft(cfg: dict, sid: str, prompt: str, budget: int,
     try:
         for ev in model_client.chat_stream(base, key, model, messages,
                                            temperature=cfg.get("temperature", 0.8),
-                                           max_tokens=budget):
+                                           max_tokens=budget, extra=think):
             if ev["type"] == "delta":
                 parts.append(ev["text"])
                 yield _sse("delta", index=index, text=ev["text"],
@@ -699,6 +777,10 @@ def _stream_one_draft(cfg: dict, sid: str, prompt: str, budget: int,
             elif ev["type"] == "reasoning":
                 yield _sse("reasoning", index=index)
             else:
+                _thinking_aftermath(cfg, route, model, sid,
+                                    {"thinking_fallback": ev.get("thinking_fallback"),
+                                     "reasoning_tokens":
+                                         (ev.get("usage") or {}).get("reasoning_tokens")})
                 usage = ev["usage"]
                 finish = ev.get("finish_reason")
     except ValueError as exc:
@@ -749,7 +831,8 @@ def _stream_one_draft(cfg: dict, sid: str, prompt: str, budget: int,
                 if numbers_ctx else None)
     yield _sse(done_event, index=index, text=text, usage=usage,
                fp_check=fp, borrow_check=borrow, ai_cliche=aic,
-               numbers_check=nums, names_check=nms, **(extra or {}))
+               numbers_check=nums, names_check=nms,
+               warnings=_session_warnings(sid), **(extra or {}))
 
 
 def _short(exc: Exception, n: int = 120) -> str:
@@ -784,7 +867,8 @@ def do_generate_stream(body: GenerateIn):
                                          prep["pack_dir"], i, numbers_ctx=nctx,
                                          route=prep["route"])
         yield _sse("all_done", assembly_tokens=prep["assembly"]["total_est_tokens"],
-                   budget=_budget_state(prep["project_dir"], body.chapter_no, sid))
+                   budget=_budget_state(prep["project_dir"], body.chapter_no, sid),
+                   warnings=_session_warnings(sid))
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache",
@@ -919,7 +1003,8 @@ def do_rewrite(body: RewriteIn):
             "kept_ratio": round(kept_ratio, 3),
             "kept_warning": kept_ratio < 0.6,
             "fp_check": fp, "borrow_check": borrow, "ai_cliche": aic,
-            "budget": _budget_state(prep["project_dir"], body.chapter_no, sid)}
+            "budget": _budget_state(prep["project_dir"], body.chapter_no, sid),
+            "warnings": _session_warnings(sid)}
 
 
 class ExportIn(BaseModel):
@@ -1465,7 +1550,8 @@ def _budget_state(project_dir: Path, chapter_no: int, sid: str) -> dict | None:
             "breakdown": {"gen": int(s.get("gen", 0)),
                           "rev": int(s.get("rev", 0)),
                           "other": int(s.get("other", 0))},
-            "arc_budget": int(b.get("arc_budget") or 0)}
+            "arc_budget": int(b.get("arc_budget") or 0),
+            "warnings": _session_warnings(sid)}
 
 
 def _budget_gate(project_dir: Path, chapter_no: int, sid: str,

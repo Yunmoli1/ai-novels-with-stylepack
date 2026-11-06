@@ -61,17 +61,35 @@ class MockHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.endswith("/models"):
-            self._send({"data": [{"id": "mock-write"}, {"id": "mock-judge"}]})
+            self._send({"data": [{"id": "mock-write"}, {"id": "mock-judge"},
+                                 {"id": "mock-thinkreject"}, {"id": "mock-thinktok"}]})
         else:
             self.send_response(404)
             self.end_headers()
+
+    def _send_400(self, obj):
+        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(400)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         payload = json.loads(self.rfile.read(length) or b"{}")
         LAST["payload"] = payload
+        LAST["n"] = LAST.get("n", 0) + 1
         LAST["user_msg"] = payload["messages"][-1]["content"]
         model = payload.get("model", "mock")
+        # v0.13.8 拒参模型：带思考参数即 400（错误文本含参数名，供去参判定）——
+        # 模拟"供应商不认识这组参数"的真相（OpenAI 式 Unrecognized argument）
+        if model == "mock-thinkreject" and any(
+                k in payload for k in ("reasoning_effort", "thinking",
+                                       "enable_thinking", "reasoning")):
+            self._send_400({"error": {"message": "Unrecognized request "
+                                       "argument supplied: reasoning_effort"}})
+            return
         trunc = model == "mock-trunc"  # 截断模型：≤7000 给半截+length，>7000 全文（修订预算 ×2 首试也截断）
         thinking = (model == "mock-think"
                     or (model == "mock-think-once"
@@ -97,10 +115,12 @@ class MockHandler(BaseHTTPRequestHandler):
             content, fr = (full[:30], "length") if cut else (full, "stop")
         else:
             content, fr = self._content_for(LAST["user_msg"]), "stop"
+        usage = {"prompt_tokens": 100, "completion_tokens": 50}
+        if model == "mock-thinktok":  # v0.13.8：usage 带思考 token 计数
+            usage["completion_tokens_details"] = {"reasoning_tokens": 42}
         self._send({"choices": [{"message": {"content": content},
                                  "finish_reason": fr}],
-                    "model": model,
-                    "usage": {"prompt_tokens": 100, "completion_tokens": 50}})
+                    "model": model, "usage": usage})
 
     def _content_for(self, user_msg):
         if "设定工坊·世界观块候选" in user_msg:  # v0.13.6 设定工坊
@@ -164,9 +184,12 @@ class MockHandler(BaseHTTPRequestHandler):
                 chunk({"choices": [{"delta": {"content": content[i:i + step]}}]})
         chunk({"choices": [{"delta": {}, "finish_reason": finish}]})
         if payload.get("stream_options", {}).get("include_usage"):
-            chunk({"choices": [], "usage": {"prompt_tokens": 100,
-                   "completion_tokens": payload.get("max_tokens", 0)
-                   if finish == "length" else 50}})
+            u = {"prompt_tokens": 100,
+                 "completion_tokens": payload.get("max_tokens", 0)
+                 if finish == "length" else 50}
+            if payload.get("model") == "mock-thinktok":  # v0.13.8 交叉验证
+                u["completion_tokens_details"] = {"reasoning_tokens": 42}
+            chunk({"choices": [], "usage": u})
         self.wfile.write(b"data: [DONE]\n\n")
 
 
@@ -412,6 +435,166 @@ class TestWebServer(unittest.TestCase):
             self.assertIn("思考", g.json()["detail"])
         finally:
             self._set_write_route("mock-write")
+
+    # ---- v0.13.8 思考档：L1 映射 / L2 探针记档 / L3 去参兜底 / usage 交叉验证 ----
+
+    def _set_thinking(self, model, level=None, custom=None):
+        """设 write 路由思考档；顺手清该模型的支持度记档（防用例间污染——
+        记档是持久状态，前序用例的 False 会让后序用例根本不发参）。"""
+        cfg = appstate.load_config(self.cfg_path)
+        cfg["routing"]["write"] = {"provider": "mock", "model": model}
+        if level:
+            cfg["routing"]["write"]["thinking"] = level
+        if custom:
+            cfg["routing"]["write"]["thinking_json"] = custom
+        for p in cfg["providers"]:
+            if p.get("name") == "mock":
+                (p.setdefault("thinking_support", {})).pop(model, None)
+        appstate.save_config(cfg, self.cfg_path)
+
+    def test_thinking_extra_host_mapping(self):
+        """L1 主机映射：GLM/Qwen/OpenRouter 各按自家参数形态；未识别主机
+        （中转站）走 OpenAI reasoning_effort 形态由探针验真伪；不选档=零参数；
+        自定义 JSON 显式优先。"""
+        self.assertIsNone(appstate.thinking_extra("http://x", None))
+        self.assertIsNone(appstate.thinking_extra("http://x", "bogus"))
+        self.assertEqual(appstate.thinking_extra("https://open.bigmodel.cn/api", "off"),
+                         {"thinking": {"type": "disabled"}})
+        self.assertEqual(appstate.thinking_extra("https://open.bigmodel.cn/api", "high"),
+                         {"thinking": {"type": "enabled"}})
+        self.assertEqual(appstate.thinking_extra("https://dashscope.aliyuncs.com/v1", "off"),
+                         {"enable_thinking": False})
+        self.assertEqual(appstate.thinking_extra("https://dashscope.aliyuncs.com/v1", "low"),
+                         {"enable_thinking": True})
+        self.assertEqual(appstate.thinking_extra("https://openrouter.ai/api/v1", "medium"),
+                         {"reasoning": {"effort": "medium"}})
+        self.assertEqual(appstate.thinking_extra("https://openrouter.ai/api/v1", "off"),
+                         {"reasoning": {"enabled": False, "exclude": True}})
+        self.assertEqual(appstate.thinking_extra("https://api.openai.com/v1", "off"),
+                         {"reasoning_effort": "minimal"})
+        self.assertEqual(appstate.thinking_extra("http://127.0.0.1:9/v1", "high"),
+                         {"reasoning_effort": "high"})
+        self.assertEqual(appstate.thinking_extra("http://x", "low",
+                                                 {"thinking": {"type": "enabled"}}),
+                         {"thinking": {"type": "enabled"}})
+
+    def test_thinking_probe_reject_and_persist(self):
+        """L2 探针：拒绝（400+参数名）→ ok=False 记档；set_config 保存后记档
+        仍在（供应商合并保留 thinking_support）。"""
+        r = self.client.post("/app/api/config/thinking-probe", json={
+            "provider": "mock", "model": "mock-thinkreject", "level": "low"})
+        self.assertEqual(r.status_code, 200)
+        j = r.json()
+        self.assertFalse(j["ok"])
+        self.assertIn("reasoning_effort", j["detail"])
+        self.assertEqual(j["extra"], {"reasoning_effort": "low"})
+        stored = appstate.load_config(self.cfg_path)
+        self.assertFalse(stored["providers"][0]["thinking_support"]["mock-thinkreject"])
+        d = self.client.get("/app/api/config").json()
+        r2 = self.client.post("/app/api/config", json={
+            "providers": d["providers"], "routing": d["routing"], "rev": d["rev"]})
+        self.assertEqual(r2.status_code, 200)
+        stored2 = appstate.load_config(self.cfg_path)
+        self.assertFalse(stored2["providers"][0]["thinking_support"]["mock-thinkreject"])
+
+    def test_thinking_probe_accept_and_inconclusive(self):
+        """L2 探针：接受 → True 记档；网络不通 → None 且不记档（不冤枉参数）。"""
+        r = self.client.post("/app/api/config/thinking-probe", json={
+            "provider": "mock", "model": "mock-write", "level": "high"})
+        self.assertTrue(r.json()["ok"])
+        stored = appstate.load_config(self.cfg_path)
+        self.assertTrue(stored["providers"][0]["thinking_support"]["mock-write"])
+        cfg = appstate.load_config(self.cfg_path)
+        cfg["providers"].append({"name": "dead", "base_url": "http://127.0.0.1:1/v1",
+                                 "api_key": "k", "models": ["m"]})
+        appstate.save_config(cfg, self.cfg_path)
+        try:
+            r2 = self.client.post("/app/api/config/thinking-probe", json={
+                "provider": "dead", "model": "m", "level": "low"})
+            self.assertIsNone(r2.json()["ok"], "连接失败必须报'未确认'而非误判支持")
+            stored2 = appstate.load_config(self.cfg_path)
+            dead = next(p for p in stored2["providers"] if p["name"] == "dead")
+            self.assertNotIn("thinking_support", dead, "未确认不得记档")
+        finally:
+            cfg3 = appstate.load_config(self.cfg_path)
+            cfg3["providers"] = [p for p in cfg3["providers"] if p["name"] != "dead"]
+            appstate.save_config(cfg3, self.cfg_path)
+
+    def test_thinking_param_rejected_falls_back(self):
+        """L3 运行时兜底：带思考档请求被 400 拒 → 同端点自动去参重试出稿
+        （恰 2 次调用、最终 payload 无参数）+ 记档 False + 响应带显式警告。"""
+        self._set_thinking("mock-thinkreject", level="low")
+        try:
+            n0 = LAST.get("n", 0)
+            g = self.client.post("/app/api/generate", json={
+                "project": "测试项目", "pack": "luxun", "chapter_no": 3,
+                "title": "夜谈", "keywords": [], "chosen": OUTLINE["options"][0],
+                "beats": BEATS["beats"], "tone_note": "不指定",
+                "canon_anchor": "无", "n_drafts": 1, "session_id": "thkfb"})
+            self.assertEqual(g.status_code, 200)
+            self.assertIn("细雨", g.json()["drafts"][0]["text"])
+            self.assertEqual(LAST.get("n", 0) - n0, 2, "应恰为 400+去参重试两次调用")
+            self.assertNotIn("reasoning_effort", LAST["payload"])
+            stored = appstate.load_config(self.cfg_path)
+            self.assertFalse(stored["providers"][0]["thinking_support"]["mock-thinkreject"])
+            warns = g.json().get("warnings") or []
+            self.assertTrue(any("去参" in w for w in warns), f"警告缺失：{warns}")
+        finally:
+            self._set_thinking("mock-write")
+
+    def test_thinking_gate_blocks_param_after_reject(self):
+        """记档 False 后 route_thinking 返回 None——后续调用一次成稿，
+        零 400 重试（支持度门在出手前生效）。"""
+        self._set_thinking("mock-thinkreject", level="low")
+        try:
+            self.client.post("/app/api/config/thinking-probe", json={
+                "provider": "mock", "model": "mock-thinkreject", "level": "low"})
+            n0 = LAST.get("n", 0)
+            g = self.client.post("/app/api/generate", json={
+                "project": "测试项目", "pack": "luxun", "chapter_no": 3,
+                "title": "夜谈", "keywords": [], "chosen": OUTLINE["options"][0],
+                "beats": BEATS["beats"], "tone_note": "不指定",
+                "canon_anchor": "无", "n_drafts": 1, "session_id": "thkgate"})
+            self.assertEqual(g.status_code, 200)
+            self.assertEqual(LAST.get("n", 0) - n0, 1,
+                             "记档拒绝后不应再发参（无 400 去参重试）")
+        finally:
+            self._set_thinking("mock-write")
+
+    def test_thinking_off_with_reasoning_tokens_warns(self):
+        """usage 交叉验证（真伪生效）：思考档=关但 reasoning_tokens=42 →
+        '参数疑似未生效'警告；思考档有值但计数为 0 同理。"""
+        self._set_thinking("mock-thinktok", level="off")
+        try:
+            g = self.client.post("/app/api/generate", json={
+                "project": "测试项目", "pack": "luxun", "chapter_no": 3,
+                "title": "夜谈", "keywords": [], "chosen": OUTLINE["options"][0],
+                "beats": BEATS["beats"], "tone_note": "不指定",
+                "canon_anchor": "无", "n_drafts": 1, "session_id": "thktok"})
+            self.assertEqual(g.status_code, 200)
+            self.assertEqual(g.json()["drafts"][0]["usage"].get("reasoning_tokens"), 42)
+            warns = g.json().get("warnings") or []
+            self.assertTrue(any("疑似未生效" in w for w in warns), f"警告缺失：{warns}")
+        finally:
+            self._set_thinking("mock-write")
+
+    def test_thinking_param_rejected_stream_falls_back(self):
+        """流式路径同样兜底：首流 400 → 去参重试同端点出稿，draft_done 带警告。"""
+        self._set_thinking("mock-thinkreject", level="low")
+        try:
+            n0 = LAST.get("n", 0)
+            r = self.client.post("/app/api/generate_stream", json={
+                "project": "测试项目", "pack": "luxun", "chapter_no": 6,
+                "title": "夜谈", "keywords": [], "chosen": OUTLINE["options"][0],
+                "beats": BEATS["beats"], "tone_note": "不指定",
+                "canon_anchor": "无", "n_drafts": 1, "session_id": "thkstream"})
+            self.assertEqual(r.status_code, 200)
+            self.assertIn("event: draft_done", r.text)
+            self.assertEqual(LAST.get("n", 0) - n0, 2)
+            self.assertNotIn("reasoning_effort", LAST["payload"])
+            self.assertIn("去参", r.text)
+        finally:
+            self._set_thinking("mock-write")
 
     def test_save_rejects_empty_and_bad_title(self):
         """v0.6.2 事故回归：空稿+空题被交付成 001-.md（0 字节）。

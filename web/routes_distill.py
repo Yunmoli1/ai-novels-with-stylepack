@@ -398,7 +398,8 @@ def _distill_call(cfg: dict, sid: str, prompt: str, max_tokens: int) -> dict:
                                      "content": distillation.SYSTEM_READ},
                                     {"role": "user", "content": prompt}],
                                    temperature=distillation.READ_TEMPERATURE,
-                                   max_tokens=max_tokens)
+                                   max_tokens=max_tokens,
+                                   extra=_rc.appstate.route_thinking(cfg, "write"))
     except ValueError as exc:
         raise HTTPException(502, str(exc))
     _rc._record_usage(sid, result)

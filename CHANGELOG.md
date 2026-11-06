@@ -2,6 +2,45 @@
 
 所有显著变更记录于此。格式参照 Keep a Changelog，版本遵循 SemVer。
 
+## [0.13.8] - 2026-11-07
+
+### Added（思考档控制：把"供应商侧手工切档"收进工作台）
+- **模型配置页每个路由条目新增"思考档"下拉**：默认·不传 / 关思考 / 低 / 中 /
+  高 / 自定义 JSON——在此之前思考强度只能换模型 id 或去供应商控制台切，
+  工作台请求体只有 model/messages/temperature/max_tokens 四个字段；
+- **L1 主机映射**（appstate.thinking_extra）：按 base_url 主机名出对家参数——
+  GLM（zhipu/bigmodel）=thinking.type（无档位只有开/关）、
+  Qwen（dashscope/aliyuncs）=enable_thinking、OpenRouter=reasoning.effort、
+  OpenAI 官方与未识别主机（中转站常态）=reasoning_effort；**不选档=零额外
+  参数，错误参数根本不出手**；自定义 JSON 显式优先，兜底全能；
+- **L2 探针记档**（POST /app/api/config/thinking-probe + model_client.probe_extra）：
+  选档后自动单发最小请求（max_tokens=8，≈个位数 token）验供应商收不收——
+  ✓ 支持记档直发；✗ 拒绝（400 且错误文本含参数名）记档后该路由不再发参，
+  显式重新探针才恢复；？网络/其他错=未确认不记档（不冤枉参数）；
+- **L3 运行时兜底**（model_client.chat/chat_stream 的 extra 参数）：带参请求
+  被 400 拒 → 同端点自动去参重试出稿，创作环永不断；结果带
+  thinking_fallback 供上层记档+**响亮警告**（toast+预算面板）——绝不静默
+  （用户选关思考是为省成本，静默回退=成本悄悄爆炸）；
+  流式路径错误体在流上下文内读出（raise_for_status 后 .text 报
+  ResponseNotRead 的坑已绕开）；
+- **usage 交叉验证**：completion_tokens_details.reasoning_tokens 透出到记账
+  结果——选"关"但思考 token 仍涨 / 选档但计数恒 0 → "参数疑似未生效"警告
+  （探针只能证"不拒收"，这道证"真生效"）；
+- 警告通道：会话级 warnings（_sessions[sid]）经 generate/save 响应、
+  draft_done/all_done SSE 事件、预算面板三处浮现，前端同一条只弹一次；
+- 蒸馏调用（_distill_call）与创作/量产/判官全路由同步接入；
+- set_config：供应商合并保留 thinking_support 记档（同 api_key 保留机制）；
+  routing 思考档字段白名单消毒（非法值剥除）。
+
+### 测试
+- mock 加 mock-thinkreject（带思考参数即 400）与 mock-thinktok（usage 带
+  reasoning_tokens=42）两模型；新增 7 用例：L1 映射九断言 / 探针拒绝+记档
+  持久（含 set_config 保留）/ 探针接受+网络不通不记档 / 非流 400 去参重试
+  （恰 2 次调用+最终 payload 无参数+警告）/ 记档拒绝后零重试（出手前生效）/
+  usage 交叉验证警告 / 流式 400 去参重试；**测试 192+9**
+- 浏览器实测：配置页四路由行控件渲染 + 真实探针（api.deepseek.com 接受
+  reasoning_effort → "✓ 支持（已记档）"）全链路一次通。
+
 ## [0.13.7] - 2026-11-06
 
 ### Fixed（用户实测反馈第三轮：工作台跨页失忆）
