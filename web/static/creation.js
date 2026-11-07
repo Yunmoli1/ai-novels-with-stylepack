@@ -88,8 +88,8 @@ async function init() {
   maybeRedirectLongform();
   S.packVersions = {};
   (d.packs || []).forEach(p => S.packVersions[p.name] = p.version || '');
-  $('pack').innerHTML = d.packs.map(p => `<option value="${p.name}">${p.name}</option>`).join('');
-  formHook(); formRestore();  // 表单跨页记忆：项目/包下拉就绪后恢复上次工作态
+  S.packList = d.packs || [];  // v0.13.12：全局包列表（下拉重建在 switchProject）
+  formHook();  // 表单跨页记忆：挂钩（恢复在 switchProject 内做——需先重建包下拉）
   try {
     const c = await (await fetch('/app/api/config')).json();
     const w = (c.routing || {}).write || {};
@@ -210,7 +210,9 @@ async function switchProject() {
       + encodeURIComponent($('project').value))).json();
     if (n.next) $('chapter_no').value = n.next;
   } catch (e) {}
+  await loadProjectPacks();  // v0.13.12：重建包下拉（本项目分组）+取默认链
   formRestore();  // 表单跨页记忆：覆盖默认建议（该项目的上次工作态）
+  applyDefaultPack();  // 默认解析链覆盖包字段（显式默认>form 记忆）
   await loadG0();
 }
 async function loadSlots() {
@@ -1387,6 +1389,52 @@ function pipeRender() {
   det.innerHTML = body;
 }
 function pipeStep(id) { PIPE_STEP = id; pipeRender(); }
+// ---- 项目本地包入册 + 默认解析链（v0.13.12）----
+// 默认链：workbench.json 显式设置 > 钉扎头 > 唯一本地包（服务端算好返回）；
+// 会话内手动换包即时生效但不改默认——想换默认点「设为默认」（显式优于隐式）。
+async function loadProjectPacks() {
+  const proj = $('project') && $('project').value;
+  if (!proj || !$('pack')) return;
+  let pp = { packs: [], default_pack: null, hint: '' };
+  try { pp = await (await fetch('/app/api/serial/project_packs?project='
+    + encodeURIComponent(proj))).json(); } catch (e) {}
+  S.projectPacks = pp.packs || [];
+  S.defaultPack = pp.default_pack || null;
+  S.defaultHint = pp.hint || '';
+  const cur = $('pack').value;
+  const g = (S.packList || []).map(p =>
+    `<option value="${esc(p.name)}">${esc(p.name)}${p.version ? ' v' + esc(p.version) : ''}</option>`).join('');
+  const pjOpts = S.projectPacks.map(p =>
+    `<option value="${esc(p.name)}">${esc(p.display_name || p.name)} v${esc(p.version || '?')}（本项目）</option>`).join('');
+  $('pack').innerHTML = (pjOpts ? `<optgroup label="本项目">${pjOpts}</optgroup>` : '')
+    + (g ? `<optgroup label="全局 / local">${g}</optgroup>` : '');
+  if ([...$('pack').options].some(o => o.value === cur)) $('pack').value = cur;
+}
+function applyDefaultPack() {
+  const hint = $('pack_hint');
+  if (S.defaultPack && $('pack') && [...$('pack').options].some(o => o.value === S.defaultPack))
+    $('pack').value = S.defaultPack;  // 默认链覆盖 form 记忆的包字段
+  if (hint) hint.innerHTML = S.defaultPack
+    ? `📌 ${esc(S.defaultHint || '本项目默认')} · <a href="javascript:void(0)" onclick="clearDefaultPack()">清除</a>`
+    : '';
+}
+async function setDefaultPack() {
+  const proj = $('project') && $('project').value;
+  const pack = $('pack') && $('pack').value;
+  if (!proj || !pack) return toast('先选项目与风格包', 'bad');
+  try { await post('/app/api/serial/default_pack', { project: proj, pack }); }
+  catch (e) { return toast(e.message, 'bad'); }
+  toast('已设为本项目默认包（style/workbench.json）', 'good');
+  await loadProjectPacks(); applyDefaultPack();
+}
+async function clearDefaultPack() {
+  const proj = $('project') && $('project').value;
+  if (!proj) return;
+  try { await post('/app/api/serial/default_pack', { project: proj, pack: '' }); }
+  catch (e) { return toast(e.message, 'bad'); }
+  toast('已清除默认（form 记忆接管）', 'good');
+  await loadProjectPacks(); applyDefaultPack();
+}
 // ---- 表单跨页记忆（v0.13.10）：0.13.7 记忆约定的漏网点补齐 ----
 // 位置类（包/挡位/章号）持久+失效退化（下拉无此项/非法数值回默认）；
 // 内容类（章节题/关键词=打了一半的半成品）持久，交付时随流程自然清空

@@ -209,6 +209,111 @@ def _num_sections(d: Path) -> list[dict]:
     return out
 
 
+class DefaultPackIn(BaseModel):
+    project: str
+    pack: str = ""   # 空 = 清除默认
+
+
+def _project_local_packs(d: Path) -> list[dict]:
+    """项目本地包（style/pack-*，有 pack.json 且非草稿）——v0.13.12 入册。"""
+    out = []
+    sdir = d / "style"
+    if not sdir.is_dir():
+        return out
+    for pdir in sorted(sdir.glob("pack-*")):
+        if not (pdir / "pack.json").is_file():
+            continue
+        try:
+            meta = json.loads((pdir / "pack.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            meta = {}
+        if meta.get("status") == "draft":
+            continue  # 草稿不进下拉（与全局包同规）
+        out.append({"name": f"project:{pdir.name}",
+                    "version": str(meta.get("version") or "?"),
+                    "display_name": str(meta.get("display_name") or pdir.name)})
+    return out
+
+
+def _global_pack_names() -> list[str]:
+    names = []
+    if _rc.STYLEPACKS.is_dir():
+        for pdir in sorted(_rc.STYLEPACKS.iterdir()):
+            if not pdir.is_dir() or not (pdir / "pack.json").is_file():
+                continue
+            if pdir.name == "local":
+                for sub in sorted(pdir.iterdir()):
+                    if sub.is_dir() and (sub / "pack.json").is_file():
+                        names.append(f"local/{sub.name}")
+            else:
+                names.append(pdir.name)
+    return names
+
+
+def _resolve_default_pack(d: Path, local_packs: list[dict]) -> tuple[str | None, str]:
+    """默认包解析链（v0.13.12）：workbench.json 显式设置 > 钉扎头 >
+    唯一项目本地包。返回 (默认包名或 None, 提示)。"""
+    local_names = {p["name"] for p in local_packs}
+    known = local_names | set(_global_pack_names())
+    # ① 显式设置（style/workbench.json）
+    wb = d / "style" / "workbench.json"
+    if wb.is_file():
+        try:
+            wj = json.loads(wb.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            wj = {}
+        dp = wj.get("default_pack")
+        if dp and dp in known:
+            return dp, "本项目默认（显式设置）"
+    # ② 钉扎头（style-setup/pin 协议）
+    pin = appstate.read_pinned_pack(d)
+    if pin and pin.get("pack") and pin["pack"] in known:
+        return pin["pack"], f"项目钉扎 v{pin.get('version', '?')}"
+    # ③ 唯一项目本地包（多包无法判定主从，交还显式设置）
+    if len(local_names) == 1:
+        return next(iter(local_names)), "本项目唯一本地包"
+    return None, ""
+
+
+@router.get("/project_packs")
+def project_packs_view(project: str):
+    """项目本地包入册 + 默认包解析（v0.13.12）。前端据此重建包下拉
+    （本项目分组）并应用默认链。"""
+    cfg = appstate.load_config()
+    d = _proj(cfg, project)
+    packs = _project_local_packs(d)
+    default, hint = _resolve_default_pack(d, packs)
+    return {"packs": packs, "default_pack": default, "hint": hint}
+
+
+@router.post("/default_pack")
+def set_default_pack(body: DefaultPackIn):
+    """设为/清除本项目默认包 → style/workbench.json（显式优于隐式）。
+    pack 空 = 清除；全局/local/项目包均可设（存在性校验，草稿拦截）。"""
+    cfg = appstate.load_config()
+    d = _proj(cfg, body.project)
+    if body.pack:
+        if body.pack.startswith("project:"):
+            known = {p["name"] for p in _project_local_packs(d)}
+        else:
+            known = set(_global_pack_names())
+        if body.pack not in known:
+            raise HTTPException(400, f"包不存在或为草稿：{body.pack}")
+    wbdir = d / "style"
+    wbdir.mkdir(parents=True, exist_ok=True)
+    wb = wbdir / "workbench.json"
+    wj = {}
+    if wb.is_file():
+        try:
+            wj = json.loads(wb.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            wj = {}
+    wj["default_pack"] = body.pack or None
+    wb.write_text(json.dumps(wj, ensure_ascii=False, indent=2) + "\n",
+                  encoding="utf-8", newline="\n")
+    return {"ok": True, "default_pack": body.pack or None}
+
+
 @router.get("/pipeline")
 def pipeline_view(project: str, chapter: int = 0):
     """管线示波器（v0.13.9）：管线声明 + 交付会话记录摘要（泳道只读视图）。

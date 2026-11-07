@@ -55,8 +55,24 @@ def _project_dir(cfg: dict, name: str) -> Path:
     return d
 
 
-def _pack_dir(pack: str) -> Path:
+def _pack_dir(pack: str, project_dir: Path | None = None) -> Path:
+    """包名 → 包目录。v0.13.12：支持 `project:<style/下的目录名>` 前缀——
+    项目本地包（style/pack-*，防线定义的主包所在地）入册；traversal 守卫
+    + pack.json 存在 + 草稿拦截与全局包同规。"""
+    if pack.startswith("project:"):
+        if project_dir is None:
+            raise HTTPException(400, "project: 前缀包需要项目上下文")
+        name = pack[len("project:"):].strip("/")
+        d = (project_dir / "style" / name).resolve()
+        dr = project_dir.resolve()
+        if d != dr and dr not in d.parents:
+            raise HTTPException(400, "路径越界（traversal 已拦截）")
+        return _pack_dir_checked(d, pack)
     d = (STYLEPACKS / pack).resolve()
+    return _pack_dir_checked(d, pack)
+
+
+def _pack_dir_checked(d: Path, pack: str) -> Path:
     if not (d / "pack.json").is_file():
         raise HTTPException(404, f"风格包不存在或无 pack.json：{pack}")
     meta = {}
@@ -360,7 +376,7 @@ def do_assemble(body: AssembleIn):
     pdir = _project_dir(cfg, body.project)
     _ledger_gate(pdir, body.chapter_no, body.allow_unbilled)
     result = assemble_mod.assemble(
-        pdir, _pack_dir(body.pack),
+        pdir, _pack_dir(body.pack, pdir),
         body.chapter_no, body.keywords, cfg.get("context_budget_tokens", 24000))
     result.pop("kept_texts", None)  # 预览不外带全文
     return result
@@ -430,7 +446,7 @@ def slot_capture(body: SlotCaptureIn):
     否则空槽优先、其次挤掉最旧未锁定槽；全锁且无空 → 409 请解锁。"""
     cfg = appstate.load_config()
     pdir = _project_dir(cfg, body.project)
-    pack_dir = _pack_dir(body.pack)
+    pack_dir = _pack_dir(body.pack, pdir)
     now = datetime.datetime.now().isoformat(timespec="seconds")
     fp = "|".join([body.project, body.pack, str(body.chapter_no),
                    ",".join(sorted(body.keywords)),
@@ -594,7 +610,7 @@ def do_outline(body: OutlineIn):
     _ledger_gate(pdir, body.chapter_no, body.allow_unbilled)
     bs = _budget_gate(pdir, body.chapter_no, sid, body.allow_over_budget)
     assembly = assemble_mod.assemble(
-        pdir, _pack_dir(body.pack),
+        pdir, _pack_dir(body.pack, pdir),
         body.chapter_no, body.keywords, cfg.get("context_budget_tokens", 24000))
     prompt = creation.outline_prompt(body.chapter_no, body.title, body.keywords,
                                      assembly["kept_texts"], body.user_notes)
@@ -622,7 +638,7 @@ def do_beats(body: BeatsIn):
     _ledger_gate(pdir, body.chapter_no, body.allow_unbilled)
     bs = _budget_gate(pdir, body.chapter_no, sid, body.allow_over_budget)
     assembly = assemble_mod.assemble(
-        pdir, _pack_dir(body.pack),
+        pdir, _pack_dir(body.pack, pdir),
         body.chapter_no, body.keywords, cfg.get("context_budget_tokens", 24000))
     canon_note = ("二创项目：原作锚点必须落到 canon-terms.json 的 must 术语与人物"
                   if (pdir / "canon" / "canon-terms.json").is_file() else "")
@@ -650,7 +666,7 @@ def do_reroll(body: RerollIn):
     pdir = _project_dir(cfg, body.project)
     bs = _budget_gate(pdir, body.chapter_no, sid, body.allow_over_budget)
     assembly = assemble_mod.assemble(
-        pdir, _pack_dir(body.pack),
+        pdir, _pack_dir(body.pack, pdir),
         body.chapter_no, body.keywords, cfg.get("context_budget_tokens", 24000))
     prompt = creation.reroll_beat_prompt(body.chapter_no, body.title, body.chosen,
                                          body.beats, body.index,
@@ -676,7 +692,7 @@ class GenerateIn(BeatsIn):
 def _prep_generate(cfg: dict, body: GenerateIn) -> dict:
     """装配 + 提示词 + 预算：/generate 与 /generate_stream 共用（所见即所发）。"""
     project_dir = _project_dir(cfg, body.project)
-    pack_dir = _pack_dir(body.pack)
+    pack_dir = _pack_dir(body.pack, project_dir)
     sid = _session_id(body)
     _ledger_gate(project_dir, body.chapter_no, body.allow_unbilled)
     bstate = _budget_gate(project_dir, body.chapter_no, sid,
@@ -906,7 +922,7 @@ def _gate_reports_text(reports: dict) -> str:
 
 def _prep_revise(cfg: dict, body: ReviseIn) -> dict:
     project_dir = _project_dir(cfg, body.project)
-    pack_dir = _pack_dir(body.pack)
+    pack_dir = _pack_dir(body.pack, project_dir)
     bstate = _budget_gate(project_dir, body.chapter_no, _session_id(body),
                           body.allow_over_budget)
     assembly = assemble_mod.assemble(
@@ -1189,7 +1205,7 @@ def project_create(body: ProjectCreateIn):
     # 可选风格包钉扎（export 单文件 + 版本注头，复用 read_pinned_pack 协议）
     if body.pack:
         try:
-            pack_dir = _pack_dir(body.pack)
+            pack_dir = _pack_dir(body.pack, d)
         except HTTPException:
             raise HTTPException(400, f"风格包不存在：{body.pack}")
         out = d / "style" / "pinned-pack.md"
@@ -2072,7 +2088,7 @@ def longform_batch_report(body: BatchReportIn):
              and body.start <= n <= body.end] if ms.is_dir() else []
     if not files:
         raise HTTPException(404, f"区间 {body.start}-{body.end} 无章节文件")
-    r = _run_gate("fp_check.py", [str(_pack_dir(body.pack)), *files,
+    r = _run_gate("fp_check.py", [str(_pack_dir(body.pack, d)), *files,
                                   "--per-file"])
     stamp = time.strftime("%Y%m%d-%H%M%S")
     out_dir = d / "整合" / "趋势报告"

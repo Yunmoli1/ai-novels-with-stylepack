@@ -658,6 +658,59 @@ class TestWebServer(unittest.TestCase):
         self.assertFalse(_has_text_key(j2), "run 摘要泄漏了正文字段")
         self.assertNotIn(PROSE, r2.text)
 
+    def test_project_local_packs_and_default_chain(self):
+        """v0.13.12 项目本地包入册 + 默认解析链：唯一本地包自动默认 →
+        workbench.json 显式设置覆盖 → 装配端点接受 project: 前缀 →
+        traversal 拦截 → 草稿不进册。"""
+        proj = Path(self.client.get("/app/api/config").json()["workspace_root"]) / "测试项目"
+        pk = proj / "style" / "pack-localtest"
+        pk.mkdir(parents=True, exist_ok=True)
+        (pk / "pack.json").write_text(json.dumps(
+            {"name": "localtest", "version": "0.2.0",
+             "display_name": "本地测试包"}, ensure_ascii=False), encoding="utf-8")
+        try:
+            r = self.client.get("/app/api/serial/project_packs",
+                                params={"project": "测试项目"}).json()
+            self.assertEqual([p["name"] for p in r["packs"]], ["project:pack-localtest"])
+            # ③ 唯一本地包 → 自动默认
+            self.assertEqual(r["default_pack"], "project:pack-localtest")
+            # ① 显式设置覆盖（设成一个草稿包不行；设成全局包可以）
+            (proj / "style" / "pack-draft").mkdir(parents=True, exist_ok=True)
+            (proj / "style" / "pack-draft" / "pack.json").write_text(
+                json.dumps({"name": "d", "status": "draft"}), encoding="utf-8")
+            r2 = self.client.post("/app/api/serial/default_pack",
+                                  json={"project": "测试项目",
+                                        "pack": "project:pack-draft"})
+            self.assertEqual(r2.status_code, 400, "草稿包不得设默认")
+            r3 = self.client.post("/app/api/serial/default_pack",
+                                  json={"project": "测试项目", "pack": "luxun"})
+            self.assertEqual(r3.status_code, 200)
+            r4 = self.client.get("/app/api/serial/project_packs",
+                                 params={"project": "测试项目"}).json()
+            self.assertEqual(r4["default_pack"], "luxun")
+            self.assertIn("显式", r4["hint"])
+            # 装配端点吃 project: 前缀
+            a = self.client.post("/app/api/assemble", json={
+                "project": "测试项目", "pack": "project:pack-localtest",
+                "chapter_no": 50, "keywords": []})
+            self.assertEqual(a.status_code, 200)
+            # traversal 拦截
+            bad = self.client.post("/app/api/assemble", json={
+                "project": "测试项目", "pack": "project:../..",
+                "chapter_no": 50, "keywords": []})
+            self.assertEqual(bad.status_code, 400)
+            # 清除默认
+            r5 = self.client.post("/app/api/serial/default_pack",
+                                  json={"project": "测试项目", "pack": ""})
+            self.assertEqual(r5.json()["default_pack"], None)
+        finally:
+            import shutil
+            shutil.rmtree(pk, ignore_errors=True)
+            shutil.rmtree(proj / "style" / "pack-draft", ignore_errors=True)
+            wb = proj / "style" / "workbench.json"
+            if wb.is_file():
+                wb.unlink()
+
     def test_save_rejects_empty_and_bad_title(self):
         """v0.6.2 事故回归：空稿+空题被交付成 001-.md（0 字节）。
         现在必须：空稿 400；空题落「未命名」；文件名非法字符消毒。"""
