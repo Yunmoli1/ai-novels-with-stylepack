@@ -89,6 +89,7 @@ async function init() {
   S.packVersions = {};
   (d.packs || []).forEach(p => S.packVersions[p.name] = p.version || '');
   $('pack').innerHTML = d.packs.map(p => `<option value="${p.name}">${p.name}</option>`).join('');
+  formHook(); formRestore();  // 表单跨页记忆：项目/包下拉就绪后恢复上次工作态
   try {
     const c = await (await fetch('/app/api/config')).json();
     const w = (c.routing || {}).write || {};
@@ -206,6 +207,7 @@ async function switchProject() {
       + encodeURIComponent($('project').value))).json();
     if (n.next) $('chapter_no').value = n.next;
   } catch (e) {}
+  formRestore();  // 表单跨页记忆：覆盖默认建议（该项目的上次工作态）
   await loadG0();
 }
 async function loadSlots() {
@@ -1132,6 +1134,7 @@ async function doSave() {
   setStage(5);
   memoryDelta();  // 交付后自动登记（隔离区）
   pipeLoad();     // 管线示波器刷新（开着的才真刷——pipeLoad 自带守卫）
+  formSaveAfterDelivery();  // 表单记忆：题/词/章号随交付转正，下次回页是新章
 }
 // ---- 局部改写 / 导出（v0.9.3）----
 async function rewriteFragment(i) {
@@ -1346,4 +1349,63 @@ function pipeRender() {
   det.innerHTML = body;
 }
 function pipeStep(id) { PIPE_STEP = id; pipeRender(); }
+// ---- 表单跨页记忆（v0.13.10）：0.13.7 记忆约定的漏网点补齐 ----
+// 位置类（包/挡位/章号）持久+失效退化（下拉无此项/非法数值回默认）；
+// 内容类（章节题/关键词=打了一半的半成品）持久，交付时随流程自然清空
+// （显式清理挂在交付事件上——0.13.7 原则：半成品是花过 token/心思的成果）。
+const FORM_IDS = ['pack', 'chapter_no', 'title', 'keywords', 'char_tier',
+                  'target_chars'];
+function formRead() {
+  const o = {};
+  FORM_IDS.forEach(id => { const el = $(id); if (el) o[id] = el.value; });
+  return o;
+}
+function formSave() {
+  const proj = $('project') && $('project').value;
+  if (!proj) return;
+  let all = {};
+  try { all = JSON.parse(loadState('form') || '{}'); } catch (e) {}
+  all[proj] = formRead();
+  saveState('form', JSON.stringify(all));
+}
+function formRestore() {
+  const proj = $('project') && $('project').value;
+  if (!proj) return;
+  let all = {};
+  try { all = JSON.parse(loadState('form') || '{}'); } catch (e) {}
+  const f = all[proj];
+  if (!f) return;
+  FORM_IDS.forEach(id => {
+    const el = $(id);
+    if (!el || f[id] === undefined || f[id] === null) return;
+    if (el.tagName === 'SELECT'
+        && ![...el.options].some(o => o.value === f[id])) return;  // 失效退化
+    if (id === 'chapter_no' || id === 'target_chars') {
+      const n = +f[id];
+      if (!n || n <= 0) return;                                    // 非法回默认
+      if (id === 'target_chars' && (n < 300 || n > 20000)) return;
+    }
+    el.value = f[id];
+  });
+}
+function formSaveAfterDelivery() {
+  // 交付=内容类半成品转正为稿——记忆里清掉题/词/章号，下次回页给新章建议
+  const proj = $('project') && $('project').value;
+  if (!proj) return;
+  let all = {};
+  try { all = JSON.parse(loadState('form') || '{}'); } catch (e) {}
+  const f = formRead();
+  delete f.chapter_no; f.title = ''; f.keywords = '';
+  all[proj] = f;
+  saveState('form', JSON.stringify(all));
+}
+function formHook() {
+  FORM_IDS.forEach(id => {
+    const el = $(id);
+    if (!el || el._formHooked) return;
+    el._formHooked = true;
+    el.addEventListener('change', formSave);
+    el.addEventListener('input', formSave);
+  });
+}
 init();

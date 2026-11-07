@@ -1803,6 +1803,15 @@ class TestWebServer(unittest.TestCase):
         self.assertIn("stylepack.distill.pack",
                       (S / "web" / "templates" / "distill.html").read_text(encoding="utf-8"))
         self.assertIn("stylepack.forge", serial_html)
+        # v0.13.10 表单跨页记忆：creation.js 挂钩齐全（保存/恢复/交付清内容）
+        cr_js = (S / "web" / "static" / "creation.js").read_text(encoding="utf-8")
+        for mark in ("function formSave", "function formRestore",
+                     "function formHook", "function formSaveAfterDelivery",
+                     "formSaveAfterDelivery();", "formRestore();  // 表单跨页记忆"):
+            self.assertIn(mark, cr_js, f"表单记忆缺挂钩：{mark}")
+        for fid in ("pack", "chapter_no", "title", "keywords",
+                    "char_tier", "target_chars"):
+            self.assertIn(f"'{fid}'", cr_js)
         # 树：顶层目录 + 来源标注
         t = self.client.get("/app/api/serial/tree",
                             params={"project": "测试项目"}).json()
