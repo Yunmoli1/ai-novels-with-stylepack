@@ -120,11 +120,39 @@ def numbers_section(project_dir: Path, chapter_no: int) -> str:
     return ""
 
 
+def ref_pack_items(ref_pack_dirs: list[Path], project_dir: Path) -> list[dict]:
+    """参考池受限层（v0.13.13）：每个参考包一条 item——只取精华卡（card.md）
+    + 词汇表（lexicon.md），坚决不取 exemplars（范例=格式特征载体，灾厄前线
+    事故帮凶③）；文本带禁令头（取味不取形）；prio=3（预算紧张最先裁，
+    高于递归的 2）。"""
+    out = []
+    for rd in ref_pack_dirs:
+        try:
+            meta = json.loads((rd / "pack.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            meta = {}
+        disp = str(meta.get("display_name") or rd.name)
+        parts = [f"【参考包·{disp}｜只取语感：词汇/调度/情绪处理——禁止复制本参考包"
+                 "的排版、句式格式、破折号习惯（取味不取形）】"]
+        for fname in ("card.md", "lexicon.md"):
+            f = rd / fname
+            if f.is_file():
+                parts.append(splib.read_text(f)[0])
+        src = (str(rd.relative_to(project_dir))
+               if rd.is_relative_to(project_dir) else f"stylepacks/{rd.name}")
+        out.append({"kind": "包·参考", "source": src,
+                    "text": "\n\n".join(parts), "trimmable": True, "prio": 3})
+    return out
+
+
 def assemble(project_dir: Path, pack_dir: Path, chapter_no: int,
              keywords: list[str] | None = None,
-             budget_tokens: int = 24000) -> dict:
+             budget_tokens: int = 24000,
+             ref_pack_dirs: list[Path] | None = None) -> dict:
     keywords = keywords or []
     items: list[dict] = []  # 内部项：kind/source/text
+    if ref_pack_dirs:
+        items += ref_pack_items(ref_pack_dirs, project_dir)
 
     for fname, label in PACK_FILES:
         p = pack_dir / fname

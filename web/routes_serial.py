@@ -283,7 +283,15 @@ def project_packs_view(project: str):
     d = _proj(cfg, project)
     packs = _project_local_packs(d)
     default, hint = _resolve_default_pack(d, packs)
-    return {"packs": packs, "default_pack": default, "hint": hint}
+    wj = {}
+    wb = d / "style" / "workbench.json"
+    if wb.is_file():
+        try:
+            wj = json.loads(wb.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            wj = {}
+    return {"packs": packs, "default_pack": default, "hint": hint,
+            "ref_packs": wj.get("ref_packs") or []}
 
 
 @router.post("/default_pack")
@@ -312,6 +320,39 @@ def set_default_pack(body: DefaultPackIn):
     wb.write_text(json.dumps(wj, ensure_ascii=False, indent=2) + "\n",
                   encoding="utf-8", newline="\n")
     return {"ok": True, "default_pack": body.pack or None}
+
+
+class RefPacksIn(BaseModel):
+    project: str
+    ref_packs: list[str] = []
+
+
+@router.post("/ref_packs")
+def set_ref_packs(body: RefPacksIn):
+    """存项目参考池 → style/workbench.json（v0.13.13；cap 3，存在性校验，
+    草稿拒收——参考池是防线语义的项目级配置）。"""
+    if len(body.ref_packs) > 3:
+        raise HTTPException(400, "参考池上限 3 个——参考越多棘轮风险越高")
+    cfg = appstate.load_config()
+    d = _proj(cfg, body.project)
+    known_project = {p["name"] for p in _project_local_packs(d)}
+    known = known_project | set(_global_pack_names())
+    for rp in body.ref_packs:
+        if rp not in known:
+            raise HTTPException(400, f"参考包不存在或为草稿：{rp}")
+    wbdir = d / "style"
+    wbdir.mkdir(parents=True, exist_ok=True)
+    wb = wbdir / "workbench.json"
+    wj = {}
+    if wb.is_file():
+        try:
+            wj = json.loads(wb.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            wj = {}
+    wj["ref_packs"] = body.ref_packs
+    wb.write_text(json.dumps(wj, ensure_ascii=False, indent=2) + "\n",
+                  encoding="utf-8", newline="\n")
+    return {"ok": True, "ref_packs": body.ref_packs}
 
 
 @router.get("/pipeline")

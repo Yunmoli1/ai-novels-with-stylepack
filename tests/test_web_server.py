@@ -703,6 +703,55 @@ class TestWebServer(unittest.TestCase):
             r5 = self.client.post("/app/api/serial/default_pack",
                                   json={"project": "测试项目", "pack": ""})
             self.assertEqual(r5.json()["default_pack"], None)
+            # ---- v0.13.13 参考池 ----
+            # 存项目池（cap 3 + 未知包拒收）→ project_packs 回读
+            rp = self.client.post("/app/api/serial/ref_packs",
+                                  json={"project": "测试项目",
+                                        "ref_packs": ["project:pack-localtest",
+                                                      "luxun"]})
+            self.assertEqual(rp.status_code, 200)
+            r6 = self.client.get("/app/api/serial/project_packs",
+                                 params={"project": "测试项目"}).json()
+            self.assertEqual(r6["ref_packs"],
+                             ["project:pack-localtest", "luxun"])
+            rp2 = self.client.post("/app/api/serial/ref_packs",
+                                   json={"project": "测试项目", "ref_packs":
+                                         ["a", "b", "c", "d"]})
+            self.assertEqual(rp2.status_code, 400, "参考池上限 3")
+            rp3 = self.client.post("/app/api/serial/ref_packs",
+                                   json={"project": "测试项目",
+                                         "ref_packs": ["no-such-pack"]})
+            self.assertEqual(rp3.status_code, 400)
+            # 装配受限层：参考包只进精华卡+词汇表，带禁令头
+            a = self.client.post("/app/api/assemble", json={
+                "project": "测试项目", "pack": "luxun", "chapter_no": 60,
+                "keywords": [], "ref_packs": ["project:pack-localtest"]})
+            self.assertEqual(a.status_code, 200)
+            ref_items = [i for i in a.json()["items"]
+                         if i["kind"] == "包·参考"]
+            self.assertEqual(len(ref_items), 1)
+            self.assertIn("只取语感", ref_items[0]["excerpt"])
+            self.assertIn("禁止复制", ref_items[0]["excerpt"])
+            self.assertIn("pack-localtest", ref_items[0]["source"])
+            # 生成门禁：ref_borrow 加跑（mock 参考包无 exemplars → 报告仍在）
+            g = self.client.post("/app/api/generate", json={
+                "project": "测试项目", "pack": "luxun", "chapter_no": 60,
+                "title": "参考池章", "keywords": [],
+                "chosen": OUTLINE["options"][0], "beats": BEATS["beats"],
+                "tone_note": "不指定", "canon_anchor": "无",
+                "n_drafts": 1, "session_id": "refpool1",
+                "ref_packs": ["project:pack-localtest"]})
+            self.assertEqual(g.status_code, 200)
+            draft = g.json()["drafts"][0]
+            self.assertIsNotNone(draft.get("ref_borrow"))
+            self.assertEqual(len(draft["ref_borrow"]), 1)
+            self.assertIn("exit_code", draft["ref_borrow"][0])
+            # 上限 3 在装配端点同样拦截
+            a4 = self.client.post("/app/api/assemble", json={
+                "project": "测试项目", "pack": "luxun", "chapter_no": 60,
+                "keywords": [], "ref_packs": ["luxun", "local/luxun-webtest",
+                                              "luxun", "luxun"]})
+            self.assertEqual(a4.status_code, 400, "参考池上限 3")
         finally:
             import shutil
             shutil.rmtree(pk, ignore_errors=True)

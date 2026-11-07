@@ -85,6 +85,28 @@ def _pack_dir_checked(d: Path, pack: str) -> Path:
     return d
 
 
+def _ref_pack_dirs(cfg: dict, project: str,
+                   ref_packs: list[str]) -> list[Path]:
+    """参考池名列表 → 目录（v0.13.13；上限 3——棘轮风险与参考数正相关）。"""
+    if not ref_packs:
+        return []
+    if len(ref_packs) > 3:
+        raise HTTPException(400, "参考池上限 3 个——参考越多棘轮风险越高")
+    pdir = _project_dir(cfg, project)
+    return [_pack_dir(rp, pdir) for rp in ref_packs]
+
+
+def _run_ref_borrow(draft_path: Path, ref_dirs: list[Path]) -> list[dict]:
+    """参考池搬运检查：正文 vs 每个参考包语料各跑一遍 borrow_check
+    （零 token，advisory）——把防线"只准化用不准搬运"机械化。"""
+    out = []
+    for rd in ref_dirs:
+        r = _run_gate("borrow_check.py", [str(draft_path), "--pack", str(rd)])
+        r["ref_pack"] = rd.name
+        out.append(r)
+    return out
+
+
 def _resolve_model(cfg: dict, route: str) -> tuple[str, str, str]:
     prov, model = appstate.resolve_route(cfg, route)
     if not prov or not model:
@@ -327,6 +349,7 @@ class AssembleIn(BaseModel):
     pack: str
     chapter_no: int
     keywords: list[str] = []
+    ref_packs: list[str] = []     # v0.13.13 参考池（cap 3，取味不取形）
     allow_unbilled: bool = False  # C-2 拆账强制：显式确认越过
 
 
@@ -377,7 +400,8 @@ def do_assemble(body: AssembleIn):
     _ledger_gate(pdir, body.chapter_no, body.allow_unbilled)
     result = assemble_mod.assemble(
         pdir, _pack_dir(body.pack, pdir),
-        body.chapter_no, body.keywords, cfg.get("context_budget_tokens", 24000))
+        body.chapter_no, body.keywords, cfg.get("context_budget_tokens", 24000),
+        ref_pack_dirs=_ref_pack_dirs(cfg, body.project, body.ref_packs))
     result.pop("kept_texts", None)  # 预览不外带全文
     return result
 
@@ -682,6 +706,7 @@ def do_reroll(body: RerollIn):
 
 
 class GenerateIn(BeatsIn):
+    ref_packs: list[str] = []     # v0.13.13 参考池
     beats: list[dict] = []
     tone_note: str = "不指定"
     canon_anchor: str = "无"
@@ -693,13 +718,14 @@ def _prep_generate(cfg: dict, body: GenerateIn) -> dict:
     """装配 + 提示词 + 预算：/generate 与 /generate_stream 共用（所见即所发）。"""
     project_dir = _project_dir(cfg, body.project)
     pack_dir = _pack_dir(body.pack, project_dir)
+    ref_dirs = _ref_pack_dirs(cfg, body.project, body.ref_packs)
     sid = _session_id(body)
     _ledger_gate(project_dir, body.chapter_no, body.allow_unbilled)
     bstate = _budget_gate(project_dir, body.chapter_no, sid,
                           body.allow_over_budget)
     assembly = assemble_mod.assemble(
         project_dir, pack_dir, body.chapter_no, body.keywords,
-        cfg.get("context_budget_tokens", 24000))
+        cfg.get("context_budget_tokens", 24000), ref_pack_dirs=ref_dirs)
     target = _clean_target_chars(body.target_chars)
     prompt = creation.prose_prompt(body.chapter_no, body.title, body.chosen,
                                    body.beats, body.tone_note, body.canon_anchor,
@@ -709,6 +735,7 @@ def _prep_generate(cfg: dict, body: GenerateIn) -> dict:
     if g0t:
         prompt = prompt + chr(10) * 2 + g0t
     return {"pack_dir": pack_dir, "project_dir": project_dir,
+            "ref_dirs": ref_dirs,
             "assembly": assembly, "prompt": prompt, "route":
                 _write_route(cfg, project_dir, body), "bstate": bstate,
             "budget": _prose_budget(cfg, target), "target": target}
@@ -747,10 +774,12 @@ def do_generate(body: GenerateIn):
                                                 str(project_dir / "bible"
                                                     / "characters.md")])
                    if longform else None)
+            ref_b = (_run_ref_borrow(draft_path, prep["ref_dirs"])
+                     if prep.get("ref_dirs") else None)
             drafts.append({"text": result["text"], "usage": result,
                            "fp_check": fp, "borrow_check": borrow,
                            "ai_cliche": aic, "numbers_check": nums,
-                           "names_check": nms})
+                           "names_check": nms, "ref_borrow": ref_b})
     return {"session_id": sid, "drafts": drafts,
             "warnings": _session_warnings(sid),
             "assembly_preview": assembly["items"],
@@ -768,7 +797,8 @@ def _sse(type_: str, **fields) -> str:
 def _stream_one_draft(cfg: dict, sid: str, prompt: str, budget: int,
                       pack_dir: Path, index: int, done_event: str = "draft_done",
                       extra: dict | None = None,
-                      numbers_ctx: dict | None = None, route: str = "write"):
+                      numbers_ctx: dict | None = None, route: str = "write",
+                      ref_dirs: list[Path] | None = None):
     """产出一个稿的事件序列：流式优先；空稿/流式不可用回退非流加倍链（v0.6.2）。
     结尾必发 done_event（成功）或 error（失败）——前端按此收口。
     numbers_ctx（v0.11.1 B-3）：{"ledger": 路径, "chapter": 章号}——长篇项目
@@ -845,9 +875,10 @@ def _stream_one_draft(cfg: dict, sid: str, prompt: str, budget: int,
                                             "--characters",
                                             numbers_ctx["characters"]])
                 if numbers_ctx else None)
+    ref_b = (_run_ref_borrow(draft_path, ref_dirs) if ref_dirs else None)
     yield _sse(done_event, index=index, text=text, usage=usage,
                fp_check=fp, borrow_check=borrow, ai_cliche=aic,
-               numbers_check=nums, names_check=nms,
+               numbers_check=nums, names_check=nms, ref_borrow=ref_b,
                warnings=_session_warnings(sid), **(extra or {}))
 
 
@@ -881,7 +912,8 @@ def do_generate_stream(body: GenerateIn):
                                           / "bible" / "characters.md")}
             yield from _stream_one_draft(cfg, sid, prep["prompt"], prep["budget"],
                                          prep["pack_dir"], i, numbers_ctx=nctx,
-                                         route=prep["route"])
+                                         route=prep["route"],
+                                         ref_dirs=prep.get("ref_dirs"))
         yield _sse("all_done", assembly_tokens=prep["assembly"]["total_est_tokens"],
                    budget=_budget_state(prep["project_dir"], body.chapter_no, sid),
                    warnings=_session_warnings(sid))
@@ -896,6 +928,7 @@ class ReviseIn(BaseModel):
     pack: str
     chapter_no: int
     title: str
+    ref_packs: list[str] = []     # v0.13.13 参考池
     keywords: list[str] = []
     chosen: dict = {}
     beats: list[dict] = []
@@ -923,16 +956,18 @@ def _gate_reports_text(reports: dict) -> str:
 def _prep_revise(cfg: dict, body: ReviseIn) -> dict:
     project_dir = _project_dir(cfg, body.project)
     pack_dir = _pack_dir(body.pack, project_dir)
+    ref_dirs = _ref_pack_dirs(cfg, body.project, body.ref_packs)
     bstate = _budget_gate(project_dir, body.chapter_no, _session_id(body),
                           body.allow_over_budget)
     assembly = assemble_mod.assemble(
         project_dir, pack_dir, body.chapter_no, body.keywords,
-        cfg.get("context_budget_tokens", 24000))
+        cfg.get("context_budget_tokens", 24000), ref_pack_dirs=ref_dirs)
     target = _clean_target_chars(body.target_chars) or len(body.text or "")
     prompt = creation.revise_prompt(body.chapter_no, body.title, body.beats,
                                     assembly["kept_texts"], body.text,
                                     _gate_reports_text(body.reports), target)
-    return {"pack_dir": pack_dir, "prompt": prompt, "bstate": bstate,
+    return {"pack_dir": pack_dir, "ref_dirs": ref_dirs, "prompt": prompt,
+            "bstate": bstate,
             # ×2：修订要整篇重写（输出≈原文），思考型模型的推理也吃同一预算——
             # 2500 字章在 ×1 下实测推理+正文 >14000 tokens 被截成 1099 字
             "budget": _prose_budget(cfg, target) * 2}
@@ -954,8 +989,11 @@ def do_revise(body: ReviseIn):
                                                "--pack", str(prep["pack_dir"])])
         aic = _run_gate("ai_cliche_check.py", [str(draft_path),
                                                "--pack", str(prep["pack_dir"])])
+        ref_b = (_run_ref_borrow(draft_path, prep.get("ref_dirs") or [])
+                 if prep.get("ref_dirs") else None)
     return {"session_id": sid, "text": result["text"], "usage": result,
             "fp_check": fp, "borrow_check": borrow, "ai_cliche": aic,
+            "ref_borrow": ref_b,
             "budget": _budget_state(project_dir, body.chapter_no, sid),
             "revision": int(body.revision) + 1}
 
@@ -971,7 +1009,8 @@ def do_revise_stream(body: ReviseIn):
         yield _sse("status", message="按报告修订生成中……")
         yield from _stream_one_draft(cfg, sid, prep["prompt"], prep["budget"],
                                      prep["pack_dir"], 0, done_event="revised_done",
-                                     extra={"revision": int(body.revision) + 1})
+                                     extra={"revision": int(body.revision) + 1},
+                                     ref_dirs=prep.get("ref_dirs"))
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache",

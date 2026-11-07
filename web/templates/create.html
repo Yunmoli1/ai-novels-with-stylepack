@@ -53,6 +53,11 @@
   <input id="target_chars" type="number" min="300" max="20000" step="100" value="2500"
          style="width:90px;display:none" title="自定义目标字数（300–20000）">
   <button class="btn" onclick="doAssemble()">装配预览</button>
+  <div class="genrow" id="refpool_row" style="display:none;flex-wrap:wrap">
+    <span class="meta">参考池（≤3，取味不取形——只进精华卡+词汇表，fp 照主包口径）：</span>
+    <span id="refpool_boxes" style="display:flex;gap:8px;flex-wrap:wrap"></span>
+    <button class="btn ghost" id="btn_refsave" onclick="saveRefPool()">📌 存为项目参考池</button>
+  </div>
 </div>
 
 <div id="assembly" class="panel" style="display:none"></div>

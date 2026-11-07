@@ -2,7 +2,8 @@ const S = { assembly: null, session_id: '', chosen: null, beats: [],
             drafts: [], lastOptions: null, stage: -1, modelLabel: '-',
             slots: [], activeSlot: null, packVersions: {},
             batchNo: 0, batchStart: 0, projects: [],
-            g0: null, g0info: null, g0Skip: false };
+            g0: null, g0info: null, g0Skip: false,
+            refPacks: [], projectPacks: [], packList: [] };
 const STAGES = ['装配', '立意', '拍子', '生成', '门禁', '交付'];
 // v0.13.1 分家：create=单章快写 / serial=连载管理台——长篇件只在 serial 激活
 const PAGE = document.body.dataset.page || 'create';
@@ -213,6 +214,12 @@ async function switchProject() {
   await loadProjectPacks();  // v0.13.12：重建包下拉（本项目分组）+取默认链
   formRestore();  // 表单跨页记忆：覆盖默认建议（该项目的上次工作态）
   applyDefaultPack();  // 默认解析链覆盖包字段（显式默认>form 记忆）
+  // v0.13.13 参考池：上次勾选 > 项目池（workbench.json）
+  let allForm = {};
+  try { allForm = JSON.parse(loadState('form') || '{}'); } catch (e) {}
+  S.refPacks = (allForm[$('project').value] || {}).ref_packs
+    ?? (S.refPoolDefault || []);
+  renderRefPool();
   await loadG0();
 }
 async function loadSlots() {
@@ -298,7 +305,8 @@ async function loadSlot(i) {
   $('target_chars').value = tc || 2500;
   updateMeta();
   S.req = { project: s.project, pack: s.pack, chapter_no: s.chapter_no,
-            keywords: s.keywords || [], target_chars: tc };
+            keywords: s.keywords || [], target_chars: tc,
+            ref_packs: S.refPacks || [] };
   try {
     S.assembly = await post('/app/api/assemble', S.req);
     renderAssembly();
@@ -348,7 +356,7 @@ async function loadPresets() {
 async function doAssemble() {
   S.req = { project: $('project').value, pack: $('pack').value,
     chapter_no: +$('chapter_no').value, keywords: keywords(),
-    target_chars: targetChars() };
+    target_chars: targetChars(), ref_packs: S.refPacks || [] };
   try {
     S.assembly = await post('/app/api/assemble', S.req);
   } catch (e) {
@@ -1401,6 +1409,7 @@ async function loadProjectPacks() {
   S.projectPacks = pp.packs || [];
   S.defaultPack = pp.default_pack || null;
   S.defaultHint = pp.hint || '';
+  S.refPoolDefault = pp.ref_packs || [];  // v0.13.13 项目参考池默认（workbench.json）
   const cur = $('pack').value;
   const g = (S.packList || []).map(p =>
     `<option value="${esc(p.name)}">${esc(p.name)}${p.version ? ' v' + esc(p.version) : ''}</option>`).join('');
@@ -1411,6 +1420,7 @@ async function loadProjectPacks() {
   if ([...$('pack').options].some(o => o.value === cur)) $('pack').value = cur;
 }
 function applyDefaultPack() {
+  renderRefPool();  // 主包选定后参考池重渲染（主包项隐藏）
   const hint = $('pack_hint');
   if (S.defaultPack && $('pack') && [...$('pack').options].some(o => o.value === S.defaultPack))
     $('pack').value = S.defaultPack;  // 默认链覆盖 form 记忆的包字段
@@ -1434,6 +1444,53 @@ async function clearDefaultPack() {
   catch (e) { return toast(e.message, 'bad'); }
   toast('已清除默认（form 记忆接管）', 'good');
   await loadProjectPacks(); applyDefaultPack();
+}
+// ---- 参考池（v0.13.13）：主包为底+≤3 个参考包取味不取形 ----
+// 状态：S.refPacks；记忆=form[proj].ref_packs（上次勾选），项目池默认=
+// workbench.json ref_packs（防线语义的项目级配置）；装配/生成/修订请求
+// 显式携带（所见即所发），上限 3。
+function refPoolToggle(id, checked) {
+  if (checked) {
+    if (S.refPacks.length >= 3) {
+      renderRefPool();
+      return toast('参考池上限 3 个——参考越多棘轮风险越高', 'bad');
+    }
+    if (!S.refPacks.includes(id)) S.refPacks.push(id);
+  } else S.refPacks = S.refPacks.filter(x => x !== id);
+  refPoolPersist();
+  renderRefPool();
+}
+function refPoolPersist() {  // 上次勾选进 form 记忆（跨页恢复）
+  const proj = $('project') && $('project').value;
+  if (!proj) return;
+  let all = {};
+  try { all = JSON.parse(loadState('form') || '{}'); } catch (e) {}
+  all[proj] = all[proj] || {};
+  all[proj].ref_packs = S.refPacks;
+  saveState('form', JSON.stringify(all));
+}
+function renderRefPool() {
+  const row = $('refpool_row'), box = $('refpool_boxes');
+  if (!row || !box) return;
+  const packs = [...(S.projectPacks || []), ...(S.packList || [])];
+  if (!packs.length) { row.style.display = 'none'; return; }
+  row.style.display = '';
+  box.innerHTML = packs.map(p => {
+    const main = $('pack') && $('pack').value === p.name;
+    if (main) return '';  // 主包不进参考池（它已是底）
+    const on = S.refPacks.includes(p.name);
+    return `<label style="display:inline-flex;align-items:center;gap:3px` +
+      `${on ? ';color:var(--acc,#69c)' : ''}">` +
+      `<input type="checkbox" ${on ? 'checked' : ''} onchange="refPoolToggle('${esc(p.name)}', this.checked)">` +
+      `${esc(p.display_name || p.name)}</label>`;
+  }).join('');
+}
+async function saveRefPool() {
+  const proj = $('project') && $('project').value;
+  if (!proj) return;
+  try { await post('/app/api/serial/ref_packs', { project: proj, ref_packs: S.refPacks }); }
+  catch (e) { return toast(e.message, 'bad'); }
+  toast('已存为项目参考池（workbench.json）', 'good');
 }
 // ---- 表单跨页记忆（v0.13.10）：0.13.7 记忆约定的漏网点补齐 ----
 // 位置类（包/挡位/章号）持久+失效退化（下拉无此项/非法数值回默认）；
