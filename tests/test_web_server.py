@@ -750,6 +750,16 @@ class TestWebServer(unittest.TestCase):
             "project": P, "pack": "luxun", "chapter_no": 62, "keywords": []})
         kinds = [i["kind"] for i in a.json()["items"]]
         self.assertIn("记忆·单元卡", kinds)
+        # 单元口径验收：拼接各章跑门禁（脚本零改动，wrapper 拼）
+        v = self.client.post("/app/api/serial/units/verify", json={
+            "project": P, "id": "U01", "pack": "luxun"})
+        self.assertEqual(v.status_code, 200)
+        vr = v.json()
+        self.assertEqual(vr["chapters"], [61, 62])
+        self.assertGreater(vr["chars"], 0)
+        for k in ("fp_check", "borrow_check", "ai_cliche"):
+            self.assertIn(k, vr["reports"])
+            self.assertIn("exit_code", vr["reports"][k])
 
     def test_project_local_packs_and_default_chain(self):
         """v0.13.12 项目本地包入册 + 默认解析链：唯一本地包自动默认 →

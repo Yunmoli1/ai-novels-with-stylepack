@@ -716,7 +716,23 @@ async function batchStart() {
   if (!confirm(`冻结 ${queue.length} 章简报并开始连跑？预估 ≈ ${Math.round(d.estimate_tokens / 1000)}k tokens。`)) return;
   S.batchRun = { queue, stop: false, warnStreak: 0 };
   $('bp_out').textContent = '连跑中……';
+  await unitLoadSilent();  // 单元注册表就绪（v0.13.15 单元边界）
+  let prevNo = null;
   for (const row of queue) {
+    const bnd = batchUnitBoundary(row.chapter_no, prevNo);
+    if (bnd.cross) {
+      if (!bnd.unit || !bnd.approved) {
+        blog(`⛔ 单元边界：第${row.chapter_no}章属于 ${bnd.unit ? bnd.unit.id + '《' + bnd.unit.title + '》' : '未编排'}（故事卡未批准）——跨单元必须停，批准后重新预审续跑`);
+        $('bp_out').textContent = '已停在单元边界';
+        return;
+      }
+      blog(`—— 单元边界：进入 ${bnd.unit.id}《${bnd.unit.title}》（已批准）`);
+      if (!(await batchPause())) {
+        $('bp_out').textContent = '已停在单元边界';
+        return;
+      }
+    }
+    prevNo = row.chapter_no;
     if (!(await batchChapter(row))) {
       blog('⛔ 连跑终止。断点=最后交付章——重开页面从 N+1 重新预审即可续。');
       $('bp_out').textContent = '已终止';
@@ -725,6 +741,15 @@ async function batchStart() {
   }
   blog('✅ 批量完成：' + queue.length + ' 章全部交付。建议批后跑一次指纹趋势与隔离区人审。');
   $('bp_out').textContent = '批量完成。';
+}
+function batchUnitBoundary(n, prevNo) {
+  // v0.13.15 单元边界判定：本章与上一章属于不同单元（含"一边有单元一边无"）
+  const u = (S.units || []).find(x => (x.chapters || []).includes(+n));
+  const pu = prevNo === null ? null
+    : (S.units || []).find(x => (x.chapters || []).includes(+prevNo));
+  const uid = u ? u.id : null, puid = pu ? pu.id : null;
+  if (prevNo === null || uid === puid) return { cross: false };
+  return { cross: true, unit: u, approved: !!(u && u.status === 'approved') };
 }
 function batchPause() {
   return new Promise(resolve => {

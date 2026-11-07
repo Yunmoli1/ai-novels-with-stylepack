@@ -152,7 +152,8 @@ function unitRender() {
     let body = '<div class="panel" style="margin:-2px 0 6px">';
     if (u.status === 'sealed') {
       body += '<p class="meta">已封卡——L1 记忆在 memory/units.md（只读）。</p>' +
-        `<pre style="white-space:pre-wrap;font-size:12px">${(u.sealed_card || '')}</pre></div>`;
+        `<pre style="white-space:pre-wrap;font-size:12px">${(u.sealed_card || '')}</pre>` +
+        unitVerifyHtml(u) + '</div>';
       return head + body;
     }
     body += `<label>单元题 <input value="${u.title}" oninput="unitTitleInput('${u.id}', this.value)" style="width:200px"></label>` +
@@ -192,10 +193,34 @@ function unitRender() {
           `<button class="btn" onclick="unitSealConfirm('${u.id}')">✅ 确认封卡（落 units.md）</button>` +
           '</div>';
       }
+      body += unitVerifyHtml(u);
     }
     body += '</div>';
     return head + body;
   }).join('');
+}
+
+function unitVerifyHtml(u) {
+  const vr = (S.unitVerify || {})[u.id];
+  let html = '<div class="genrow">' +
+    `<button class="btn ghost" onclick="unitVerify('${u.id}')">🧪 单元口径验收（拼接各章跑门禁）</button>` +
+    `<span class="meta" id="uverify_out_${u.id}">${vr ? vr.chars + ' 字 · ' + vr.chapters.join(',') + ' 章' : ''}</span></div>`;
+  if (vr) html += Object.entries(vr.reports).map(([k, v]) =>
+    `<details><summary class="meta">${k}：exit_code=${v.exit_code}</summary>` +
+    `<pre style="white-space:pre-wrap;font-size:12px;max-height:160px;overflow:auto">${(v.report || '')}</pre></details>`).join('');
+  return html;
+}
+async function unitVerify(id) {
+  const proj = document.getElementById('project').value;
+  const pack = document.getElementById('pack') ? document.getElementById('pack').value : '';
+  const out = document.getElementById('uverify_out_' + id);
+  if (out) out.textContent = '单元口径验收中（拼接各章跑门禁）……';
+  try {
+    const r = await post('/app/api/serial/units/verify', { project: proj, id, pack });
+    S.unitVerify = S.unitVerify || {};
+    S.unitVerify[id] = r;
+    unitRender();
+  } catch (e) { if (out) out.textContent = '失败：' + e.message; }
 }
 
 // 数据装载：面板打开时 + 项目切换时（供生成软闸门查询单元状态）

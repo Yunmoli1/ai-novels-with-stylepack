@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import tempfile
 import uuid
 import sys
 from pathlib import Path
@@ -540,6 +541,56 @@ class UnitSealConfirmIn(BaseModel):
     id: str
     card: str
     checklist: dict = {}   # 四道过滤+跳读测试（人工勾选，仅记录不判定）
+
+
+class UnitVerifyIn(BaseModel):
+    project: str
+    id: str
+    pack: str
+
+
+@router.post("/units/verify")
+def unit_verify(body: UnitVerifyIn):
+    """单元口径验收（v0.13.15）：单元内各章按序拼接临时文件，跑既有门禁
+    （fp/borrow/ai_cliche 全项目；长篇加 numbers/names——脚本零改动，
+    wrapper 拼）。advisory。"""
+    cfg = appstate.load_config()
+    d = _proj(cfg, body.project)
+    units = appstate.read_units_registry(d)
+    u = next((x for x in units if x["id"] == body.id), None)
+    if not u:
+        raise HTTPException(404, f"单元不存在：{body.id}")
+    texts = []
+    for c in u.get("chapters", []):
+        f = _chapter_file(d, int(c))
+        if not f:
+            raise HTTPException(400, f"第 {c} 章未交付——验收前全章交付")
+        texts.append(f.read_text(encoding="utf-8", errors="ignore"))
+    pack_dir = _rc._pack_dir(body.pack, d)
+    longform = _rc._is_longform(d)
+    reports = {}
+    with tempfile.TemporaryDirectory() as td:
+        draft_path = Path(td) / "unit.md"
+        draft_path.write_text("\n\n".join(texts), encoding="utf-8",
+                              newline="\n")
+        reports["fp_check"] = _rc._run_gate("fp_check.py",
+                                            [str(pack_dir), str(draft_path)])
+        reports["borrow_check"] = _rc._run_gate(
+            "borrow_check.py", [str(draft_path), "--pack", str(pack_dir)])
+        reports["ai_cliche"] = _rc._run_gate(
+            "ai_cliche_check.py", [str(draft_path), "--pack", str(pack_dir)])
+        if longform:
+            reports["numbers_check"] = _rc._run_gate(
+                "numbers_check.py", [str(draft_path), "--ledger",
+                                     str(d / "bible" / "硬数字表.md"),
+                                     "--chapter", str(u.get("chapters", [0])[0])])
+            reports["names_check"] = _rc._run_gate(
+                "names_check.py", [str(draft_path), "--variants",
+                                   str(d / "bible" / "专名表.tsv"),
+                                   "--characters",
+                                   str(d / "bible" / "characters.md")])
+    return {"reports": reports, "chars": sum(len(x) for x in texts),
+            "chapters": u.get("chapters", [])}
 
 
 @router.post("/units/seal_confirm")
