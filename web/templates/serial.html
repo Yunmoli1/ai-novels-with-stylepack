@@ -27,11 +27,22 @@
   <button class="btn ghost" id="btn_ho" style="display:none" onclick="handoverDoc()">交接汇总</button>
   <button class="btn ghost" id="btn_batch" style="display:none" onclick="batchPlan()">量产连跑</button>
   <button class="btn ghost" id="btn_forge" style="display:none" onclick="forgeOpen()">设定工坊</button>
+  <button class="btn ghost" id="btn_pipe" onclick="pipeToggle()">管线</button>
   <a class="btn ghost" href="/app/history">看板/历史</a>
   <a class="btn ghost" href="/app/bible">档案编辑器</a>
 </div>
 
 <div id="arctools" class="panel" style="display:none"></div>
+
+<div id="pipebox" class="panel" style="display:none">
+  <h3 style="margin-top:0">管线示波器（只读——工序顺序经实战钉死，编辑性后续版本给参数层）</h3>
+  <div class="genrow">
+    <label>查看交付记录 <select id="pipe_run" onchange="pipeRender()"></select></label>
+    <span class="meta">🤖=LLM（花 token）· ⚙=脚本（零 token）· 👤=人（花时间）</span>
+  </div>
+  <div id="pipe_lane" style="display:flex;gap:6px;overflow-x:auto;padding:4px 0"></div>
+  <div id="pipe_detail" class="panel" style="background:var(--panel2,rgba(127,127,127,.08))"></div>
+</div>
 
 <div id="forgebox" class="panel" style="display:none">
   <h3 style="margin-top:0">设定工坊（设定版装配——块级生成，人审后落盘直进约束面板）</h3>

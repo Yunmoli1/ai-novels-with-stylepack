@@ -596,6 +596,68 @@ class TestWebServer(unittest.TestCase):
         finally:
             self._set_thinking("mock-write")
 
+    # ---- v0.13.9 管线示波器：声明 + 会话记录摘要（泳道只读） ----
+
+    def test_pipeline_manifest_and_runs(self):
+        """管线声明：三色 kind 齐全、工序顺序钉死（装配在生成前/门禁在交付前）；
+        交付一条会话记录后，pipeline 端点给出该章 run 摘要且正文不出服务端。"""
+        r = self.client.get("/app/api/serial/pipeline",
+                            params={"project": "测试项目"})
+        self.assertEqual(r.status_code, 200)
+        j = r.json()
+        steps = j["pipeline"]["steps"]
+        self.assertTrue(any(s["id"] == "assemble" and s["kind"] == "script"
+                            for s in steps), "装配步缺失或非脚本")
+        self.assertTrue(any(s["id"] == "generate" and s["kind"] == "llm"
+                            for s in steps), "生成步缺失或非 LLM")
+        self.assertTrue(any(s["id"] == "review" and s["kind"] == "human"
+                            for s in steps), "人审步缺失（三色必须含人）")
+        order = [s["id"] for s in steps]
+        self.assertLess(order.index("assemble"), order.index("generate"),
+                        "家法：装配在生成前")
+        self.assertLess(order.index("generate"), order.index("save"),
+                        "家法：门禁在交付前")
+
+        # 交付一条记录（直接走 /save，验收数据链：save→sessions→pipeline）
+        sv = self.client.post("/app/api/save", json={
+            "project": "测试项目", "pack": "luxun", "chapter_no": 99,
+            "title": "管线测试", "text": PROSE, "keywords": [],
+            "checks": {"fp_check": {"script": "fp_check.py", "exit_code": 0,
+                                    "report": "PASS"}},
+            "usage": {"model": "mock-write", "prompt_tokens": 100,
+                      "completion_tokens": 50, "retries": 0,
+                      "finish_reason": "stop"},
+            "assembly_preview": [
+                {"kind": "规范·硬数字表", "source": "bible/硬数字表.md",
+                 "est_tokens": 120, "dropped": False},
+                {"kind": "记忆·前情提要", "source": "bible/记忆",
+                 "est_tokens": 80, "dropped": True}],
+            "g0": {"chapter_type": "发展"},
+            "session_id": "pipe1"})
+        self.assertEqual(sv.status_code, 200)
+
+        r2 = self.client.get("/app/api/serial/pipeline",
+                             params={"project": "测试项目", "chapter": 99})
+        self.assertEqual(r2.status_code, 200)
+        j2 = r2.json()
+        self.assertEqual(j2["runs"][0]["chapter_no"], 99)
+        self.assertEqual(j2["runs"][0]["chars"], len(PROSE))
+        self.assertEqual(j2["runs"][0]["model"], "mock-write")
+        self.assertEqual(j2["runs"][0]["checks"]["fp_check"]["exit_code"], 0)
+        kept_srcs = [i["source"] for i in j2["runs"][0]["assembly_kept"]]
+        self.assertIn("bible/硬数字表.md", kept_srcs)
+        drop_srcs = [i["source"] for i in j2["runs"][0]["assembly_dropped"]]
+        self.assertIn("bible/记忆", drop_srcs)
+        # 红线：run 摘要不得携带正文（text 只存服务端会话文件）
+        def _has_text_key(obj):
+            if isinstance(obj, dict):
+                return "text" in obj or any(_has_text_key(v) for v in obj.values())
+            if isinstance(obj, list):
+                return any(_has_text_key(v) for v in obj)
+            return False
+        self.assertFalse(_has_text_key(j2), "run 摘要泄漏了正文字段")
+        self.assertNotIn(PROSE, r2.text)
+
     def test_save_rejects_empty_and_bad_title(self):
         """v0.6.2 事故回归：空稿+空题被交付成 001-.md（0 字节）。
         现在必须：空稿 400；空题落「未命名」；文件名非法字符消毒。"""

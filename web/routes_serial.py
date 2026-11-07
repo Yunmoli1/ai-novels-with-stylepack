@@ -209,6 +209,59 @@ def _num_sections(d: Path) -> list[dict]:
     return out
 
 
+@router.get("/pipeline")
+def pipeline_view(project: str, chapter: int = 0):
+    """管线示波器（v0.13.9）：管线声明 + 交付会话记录摘要（泳道只读视图）。
+    会话记录（sessions/*.json）是 run manifest 的既有载体（v0.6.x 起）——
+    本端点只读摘要、剥正文（text 不出列表），人审/记忆两步当前未留痕，
+    泳道标"未记录"。"""
+    import pipeline
+    cfg = appstate.load_config()
+    d = _proj(cfg, project)
+    runs: list[dict] = []
+    sdir = d / "sessions"
+    if sdir.is_dir():
+        for f in sorted(sdir.glob("*.json"), reverse=True)[:40]:
+            try:
+                rec = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if chapter and rec.get("chapter_no") != chapter:
+                continue
+            usage = rec.get("usage") or {}
+            checks = rec.get("checks") or {}
+            preview = rec.get("assembly") or []
+            kept = [i for i in preview if not i.get("dropped")]
+            dropped = [i for i in preview if i.get("dropped")]
+            runs.append({
+                "file": f.name,
+                "ts": rec.get("ts", ""),
+                "chapter_no": rec.get("chapter_no"),
+                "title": rec.get("title", ""),
+                "chars": len(rec.get("text") or ""),
+                "output_file": rec.get("output_file", ""),
+                "model": usage.get("model", ""),
+                "prompt_tokens": usage.get("prompt_tokens", 0),
+                "completion_tokens": usage.get("completion_tokens", 0),
+                "retries": usage.get("retries", 0),
+                "finish_reason": usage.get("finish_reason", ""),
+                "checks": {k: {"exit_code": v.get("exit_code"),
+                               "report_head": (v.get("report") or "")[:400]}
+                           for k, v in checks.items() if isinstance(v, dict)},
+                "assembly_kept": [{"kind": i.get("kind"), "source": i.get("source"),
+                                   "est_tokens": i.get("est_tokens")}
+                                  for i in kept],
+                "assembly_dropped": [{"kind": i.get("kind"), "source": i.get("source"),
+                                      "est_tokens": i.get("est_tokens")}
+                                     for i in dropped],
+                "g0_present": bool(rec.get("g0"))
+                and not rec.get("g0", {}).get("skipped"),
+            })
+            if len(runs) >= 10:
+                break
+    return {"pipeline": pipeline.manifest(), "runs": runs, "chapter": chapter}
+
+
 @router.get("/constraints")
 def constraints_view(project: str):
     """约束面板数据：硬标准一览（人物供给级/状态/禁语、块常驻标记、术语、数字）。"""

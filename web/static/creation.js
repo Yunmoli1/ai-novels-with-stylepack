@@ -196,6 +196,7 @@ async function switchProject() {
   S.activeSlot = null;
   syncArcBtn();
   maybeRedirectLongform();
+  pipeLoad();  // 管线示波器随项目切换（关着时 no-op）
   $('title').value = ''; $('keywords').value = '';  // 新项目新章节：清残留
   $('step_g0').style.display = 'none';
   S.g0info = null; S.g0 = null; S.g0Skip = false;
@@ -1130,6 +1131,7 @@ async function doSave() {
       : '');
   setStage(5);
   memoryDelta();  // 交付后自动登记（隔离区）
+  pipeLoad();     // 管线示波器刷新（开着的才真刷——pipeLoad 自带守卫）
 }
 // ---- 局部改写 / 导出（v0.9.3）----
 async function rewriteFragment(i) {
@@ -1241,4 +1243,107 @@ function renderSummaryCard(r) {
     `<p class="meta">扫一眼确认无误 → 下方隔离区合并，下一章装配自动带前情。</p>`;
   $('sumcard').style.display = '';
 }
+// ---- 管线示波器（v0.13.9）：声明+交付记录→泳道只读视图 ----
+// 三色：llm=花 token / script=零 token / human=花时间——一眼看懂钱烧在哪、
+// 闸立在哪、哪些事只有人能干。数据=pipeline.py 声明 + sessions/*.json 摘要。
+const PIPE_KIND = { llm: '🤖', script: '⚙', human: '👤' };
+// 步骤 id → 会话记录门禁键（记录键无 gate_ 前缀且不齐整，显式映射）
+const PIPE_GATE_KEY = { gate_fp: 'fp_check', gate_borrow: 'borrow_check',
+                        gate_ai_cliche: 'ai_cliche', gate_numbers: 'numbers_check',
+                        gate_names: 'names_check' };
+let PIPE = null;
+let PIPE_STEP = '';
+async function pipeToggle() {
+  const box = $('pipebox');
+  if (!box) return;
+  if (box.style.display === 'none') { box.style.display = ''; await pipeLoad(); }
+  else box.style.display = 'none';
+}
+async function pipeLoad() {
+  const proj = $('project') && $('project').value;
+  if (!proj || !$('pipebox') || $('pipebox').style.display === 'none') return;
+  // 不按当前章过滤——当前章没写过时泳道会全空；交付记录下拉自选章节
+  try {
+    PIPE = await (await fetch('/app/api/serial/pipeline?project='
+      + encodeURIComponent(proj))).json();
+  } catch (e) { PIPE = null; }
+  const sel = $('pipe_run');
+  if (!sel) return;
+  const runs = (PIPE && PIPE.runs) || [];
+  sel.innerHTML = runs.map((r, i) =>
+    `<option value="${i}">第${r.chapter_no}章《${esc(r.title || '')}》· ${esc(r.ts || '')}</option>`).join('')
+    || '<option value="">（本项目暂无交付记录——交付一次后出现实测读数）</option>';
+  PIPE_STEP = '';
+  pipeRender();
+}
+function pipeStepState(s, run) {
+  // 步骤 id → {state: ok|warn|na, badge}
+  if (!run) return { state: 'na', badge: '本次未运行' };
+  const k = s.id;
+  if (k === 'g0') return run.g0_present ? { state: 'ok', badge: '✓ 已留痕' }
+    : { state: 'na', badge: '跳过' };
+  if (k === 'assemble') return { state: 'ok',
+    badge: `✓ ${run.assembly_kept.length} 源 / 裁 ${run.assembly_dropped.length}` };
+  if (k === 'generate') {
+    const tok = Math.round((run.prompt_tokens + run.completion_tokens) / 1000);
+    return run.retries > 0
+      ? { state: 'warn', badge: `⚠ ${run.model} ${tok}k tok · 重试×${run.retries}` }
+      : { state: 'ok', badge: `✓ ${run.model} ${tok}k tok` };
+  }
+  if (k.startsWith('gate_')) {
+    const c = run.checks[PIPE_GATE_KEY[k]];
+    if (!c) return { state: 'na', badge: '未运行' };
+    return c.exit_code === 0 ? { state: 'ok', badge: '✓ 过' }
+      : { state: 'warn', badge: '⚠ 有发现项' };
+  }
+  if (k === 'save') return { state: 'ok', badge: `✓ ${run.chars} 字` };
+  return { state: 'na', badge: '未记录' };  // review / memory：人工工序未留痕
+}
+function pipeRender() {
+  const lane = $('pipe_lane'), det = $('pipe_detail');
+  if (!lane || !det || !PIPE) return;
+  const steps = (PIPE.pipeline && PIPE.pipeline.steps) || [];
+  const runs = PIPE.runs || [];
+  const run = runs.length ? runs[+$('pipe_run').value || 0] : null;
+  if (!PIPE_STEP) PIPE_STEP = steps.length ? steps[0].id : '';
+  lane.innerHTML = steps.map(s => {
+    const st = pipeStepState(s, run);
+    const color = st.state === 'ok' ? 'var(--good)' : st.state === 'warn' ? 'var(--warn,#c80)' : 'var(--meta,#888)';
+    const bg = s.id === PIPE_STEP ? 'outline:2px solid var(--acc,#69c)' : '';
+    return `<div class="panel" style="min-width:148px;flex:0 0 auto;cursor:pointer;margin:0;${bg}" onclick="pipeStep('${s.id}')">` +
+      `<strong style="font-size:13px">${PIPE_KIND[s.kind] || ''} ${esc(s.name)}</strong><br>` +
+      `<span class="meta" style="color:${color}">${st.badge}</span></div>`;
+  }).join('<span style="align-self:center;color:var(--meta,#888)">→</span>');
+  const step = steps.find(s => s.id === PIPE_STEP) || steps[0];
+  let body = `<p class="meta"><strong>${PIPE_KIND[step.kind] || ''} ${esc(step.name)}</strong>｜${esc(step.note || '')}</p>`;
+  if (step.inputs) body += `<p class="meta">输入源：${step.inputs.map(esc).join(' · ')}</p>`;
+  if (step.params) body += `<p class="meta">可调参数（后续版本进节点面板）：${step.params.map(esc).join(' · ')}</p>`;
+  if (run) {
+    if (step.id === 'assemble') {
+      const rows = run.assembly_kept.map(i =>
+        `<div class="trow"><code>${esc(i.source || '')}</code><span class="meta">${esc(i.kind || '')}｜~${i.est_tokens} tok</span></div>`).join('');
+      const drop = run.assembly_dropped.length
+        ? `<p class="meta">✂ 预算裁剪 ${run.assembly_dropped.length} 项：` +
+          run.assembly_dropped.map(i => esc(i.source || '')).join('、') + '</p>'
+        : '<p class="meta">✂ 无裁剪（全部源进上下文）</p>';
+      body += rows + drop;
+    } else if (step.id.startsWith('gate_')) {
+      const c = run.checks[PIPE_GATE_KEY[step.id]];
+      body += c
+        ? `<p class="meta">exit_code=${c.exit_code}${c.exit_code === 0 ? '（clean）' : '（有发现项）'}</p>` +
+          `<pre style="white-space:pre-wrap;font-size:12px;max-height:180px;overflow:auto">${esc(c.report_head)}</pre>`
+        : '<p class="meta">本次交付未附此门禁结果</p>';
+    } else if (step.id === 'generate') {
+      body += `<p class="meta">模型 ${esc(run.model || '')}｜入 ${run.prompt_tokens} + 出 ${run.completion_tokens} tok｜` +
+        `截断重试 ${run.retries} 次｜finish=${esc(run.finish_reason || '')}</p>` +
+        `<p class="meta">思考档等参数留痕进节点面板（0.14）。</p>`;
+    } else if (step.id === 'save') {
+      body += `<p class="meta">输出 ${esc(run.output_file || '')}（${run.chars} 字）｜记录 ${esc(run.file)}</p>`;
+    } else if (step.id === 'g0') {
+      body += `<p class="meta">${run.g0_present ? '七字段简报已随交付留痕（sessions/ 记录内可查）。' : '本次交付跳过了 G0。'}</p>`;
+    }
+  }
+  det.innerHTML = body;
+}
+function pipeStep(id) { PIPE_STEP = id; pipeRender(); }
 init();
