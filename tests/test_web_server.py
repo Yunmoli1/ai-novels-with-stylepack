@@ -139,6 +139,16 @@ class MockHandler(BaseHTTPRequestHandler):
                 "arcs": [{"title": "敲门与旧账", "anchor": "灰港夜巡",
                           "tension": "旧案重启", "hooks": "与卷二勾连"}]}]},
                 ensure_ascii=False)
+        if "单元故事卡起草助手" in user_msg:  # v0.13.14 故事卡草拟
+            return json.dumps({"kai": "开端：雨夜认刀", "tui": "推进：立账借斧",
+                               "zhe": "转折：血月提前", "luo": "落点：该你了",
+                               "hook": "敲门声停了", "refs": "F001",
+                               "band": "2500-4500"}, ensure_ascii=False)
+        if "L1 单元卡" in user_msg:  # v0.13.14 封卡草拟
+            return json.dumps({"card": "事件：认刀立账血月三连，账第一次不平。"
+                               "情绪终点：静。新伏笔：锈徽记来历。人物：瑞亚/向导。",
+                               "current_hint": "故事内第五周；新增铜斧欠条。"},
+                              ensure_ascii=False)
         if "记忆登记项" in user_msg:  # v0.9.0 记忆 digest 提取（judge 路由）
             return json.dumps({"digest": "他钓上会说话的鱼，被绑定。",
                                "changes": [{"entity": "韩天宇",
@@ -657,6 +667,89 @@ class TestWebServer(unittest.TestCase):
             return False
         self.assertFalse(_has_text_key(j2), "run 摘要泄漏了正文字段")
         self.assertNotIn(PROSE, r2.text)
+
+    def test_units_flow(self):
+        """v0.13.14 单元卡全流程：创建（查重/章冲突）→ 故事卡编辑 →
+        批准（四行不全会 400）→ 生成软闸门数据 → 交付 → 封卡草拟 →
+        checklist 不全 400 → 确认封卡落 units.md → sealed 不可编辑。"""
+        P = "测试项目"
+        # 创建 + 查重 + 章冲突
+        r = self.client.post("/app/api/serial/units/create",
+                             json={"project": P, "id": "U01",
+                                   "title": "起家单元", "chapters": [61, 62]})
+        self.assertEqual(r.status_code, 200)
+        dup = self.client.post("/app/api/serial/units/create",
+                               json={"project": P, "id": "U01",
+                                     "title": "x", "chapters": []})
+        self.assertEqual(dup.status_code, 400)
+        conflict = self.client.post("/app/api/serial/units/create",
+                                    json={"project": P, "id": "U02",
+                                          "title": "x", "chapters": [62]})
+        self.assertEqual(conflict.status_code, 400)
+        # 批准：四行不全 → 400
+        half = self.client.post("/app/api/serial/units/update",
+                                json={"project": P, "id": "U01",
+                                      "story": {"kai": "开端"}, "status": "approved"})
+        self.assertEqual(half.status_code, 400)
+        # 补全 + 批准
+        ok = self.client.post("/app/api/serial/units/update", json={
+            "project": P, "id": "U01",
+            "story": {"kai": "开端", "tui": "推进", "zhe": "转折",
+                      "luo": "落点", "hook": "钩", "refs": "F001",
+                      "band": "2500-4500"}, "status": "approved"})
+        self.assertEqual(ok.status_code, 200)
+        # 故事卡注入生成提示词（mock 捕获 payload）
+        g = self.client.post("/app/api/generate", json={
+            "project": P, "pack": "luxun", "chapter_no": 61,
+            "title": "单元章", "keywords": [], "chosen": OUTLINE["options"][0],
+            "beats": BEATS["beats"], "tone_note": "不指定",
+            "canon_anchor": "无", "n_drafts": 1, "session_id": "unitg1"})
+        self.assertEqual(g.status_code, 200)
+        self.assertIn("单元故事卡（已批准）", LAST["user_msg"])
+        self.assertIn("开端", LAST["user_msg"])
+        # 封卡草拟：未交付章 → 400
+        sd0 = self.client.post("/app/api/serial/units/seal_draft",
+                               json={"project": P, "id": "U01"})
+        self.assertEqual(sd0.status_code, 400)
+        # 交付 61 章（/save 落 manuscript）
+        sv = self.client.post("/app/api/save", json={
+            "project": P, "pack": "luxun", "chapter_no": 61,
+            "title": "单元章", "text": PROSE, "session_id": "unitg1"})
+        self.assertEqual(sv.status_code, 200)
+        # 交付 62 章（单元内全章交付后才可封卡）
+        sv2 = self.client.post("/app/api/save", json={
+            "project": P, "pack": "luxun", "chapter_no": 62,
+            "title": "单元章二", "text": PROSE_REVISED, "session_id": "unitg1"})
+        self.assertEqual(sv2.status_code, 200)
+        # 封卡草拟：mock 出候选
+        sd = self.client.post("/app/api/serial/units/seal_draft",
+                              json={"project": P, "id": "U01"})
+        self.assertEqual(sd.status_code, 200)
+        self.assertIn("card", sd.json()["candidate"])
+        # checklist 不全 → 400
+        sc0 = self.client.post("/app/api/serial/units/seal_confirm", json={
+            "project": P, "id": "U01", "card": "事件：试。", "checklist": {}})
+        self.assertEqual(sc0.status_code, 400)
+        # 确认封卡 → units.md 落卡
+        sc = self.client.post("/app/api/serial/units/seal_confirm", json={
+            "project": P, "id": "U01", "card": "事件：认刀立账。情绪终点：静。",
+            "checklist": {k: True for k in
+                          ("跳读测试", "对话出声读", "人格锚点对照",
+                           "讲古打断", "情绪停留")}})
+        self.assertEqual(sc.status_code, 200)
+        # L1 落盘（原生格式）+ sealed 不可编辑
+        proj = Path(self.client.get("/app/api/config").json()["workspace_root"]) / P
+        umd = (proj / "memory" / "units.md").read_text(encoding="utf-8")
+        self.assertIn("## U01《起家单元》", umd)
+        edit = self.client.post("/app/api/serial/units/update",
+                                json={"project": P, "id": "U01",
+                                      "title": "改", "status": "draft"})
+        self.assertEqual(edit.status_code, 400)
+        # 前情：装配带 记忆·单元卡
+        a = self.client.post("/app/api/assemble", json={
+            "project": P, "pack": "luxun", "chapter_no": 62, "keywords": []})
+        kinds = [i["kind"] for i in a.json()["items"]]
+        self.assertIn("记忆·单元卡", kinds)
 
     def test_project_local_packs_and_default_chain(self):
         """v0.13.12 项目本地包入册 + 默认解析链：唯一本地包自动默认 →

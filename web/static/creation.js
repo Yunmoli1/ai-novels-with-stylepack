@@ -104,6 +104,7 @@ async function init() {
   // 表单恢复（switchProject 内部再跑一次 formRestore，以它为准）
   if ($('project') && $('project').value) await switchProject();
 }
+
 async function renderOnboard(d) {
   if (!$('ob_steps')) return;  // 连载台无引导面板（分区共存：缺元素即跳过）
   const cfg = await (await fetch('/app/api/config')).json();
@@ -164,6 +165,7 @@ function syncArcBtn() {
   $('btn_ho').style.display = lf ? '' : 'none';
   $('btn_batch').style.display = lf ? '' : 'none';
   if ($('btn_forge')) $('btn_forge').style.display = lf ? '' : 'none';
+  if ($('btn_units')) $('btn_units').style.display = lf ? '' : 'none';
 }
 async function newArc() {
   const title = prompt('弧名（本弧的张力主题，如：敲门与旧账）：');
@@ -220,6 +222,7 @@ async function switchProject() {
   S.refPacks = (allForm[$('project').value] || {}).ref_packs
     ?? (S.refPoolDefault || []);
   renderRefPool();
+  if (PAGE === 'serial' && typeof unitLoadSilent === 'function') unitLoadSilent();
   await loadG0();
 }
 async function loadSlots() {
@@ -989,7 +992,14 @@ function serializeBatches() {  // 批次落盘（slots）：轻量字段，刷�
 function persistBatches() {  // 批次与最新稿一并写回当前槽
   slotPatch(S.activeSlot, { drafts: serializeBatches(), latest_draft: pickLatest() });
 }
+function unitGate() {  // v0.13.14 单元卡闸门（软）：未批准单元的章 confirm 可越
+  const u = (S.units || []).find(x => (x.chapters || []).includes(+$('chapter_no').value));
+  if (!u || u.status === 'approved') return true;
+  const st = u.status === 'sealed' ? '已封卡' : '草稿';
+  return confirm(`本章属于单元卡 ${u.id}《${u.title}》（状态：${st}）——单元卡闸门未批准。仍要生成？`);
+}
 async function doGenerate() {
+  if (!unitGate()) return;
   if (!S.beats.length) return toast('先完成拍子表', 'bad');
   capBatches();
   renderDrafts();  // 被挤掉的最旧批卡片同步消失

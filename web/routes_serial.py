@@ -355,6 +355,220 @@ def set_ref_packs(body: RefPacksIn):
     return {"ok": True, "ref_packs": body.ref_packs}
 
 
+# ---- 单元卡（v0.13.14）：两级单位——故事卡（前置闸门）+封卡（L1 记忆）----
+
+
+def _chapter_file(d: Path, no: int) -> Path | None:
+    ms = d / "manuscript"
+    if not ms.is_dir():
+        return None
+    hits = sorted(ms.glob(f"{no:03d}-*.md")) or sorted(ms.glob(f"{no}-*.md"))
+    return hits[0] if hits else None
+
+
+@router.get("/units")
+def units_view(project: str):
+    """单元注册表（workbench.json）+ 交付状态 + L1 记忆卡（units.md）。"""
+    cfg = appstate.load_config()
+    d = _proj(cfg, project)
+    units = appstate.read_units_registry(d)
+    for u in units:
+        u["chapters_status"] = [
+            {"no": c, "delivered": _chapter_file(d, int(c)) is not None}
+            for c in u.get("chapters", [])]
+    cards = appstate.units_md_cards(d)
+    return {"units": units, "memory_cards": cards[-10:],
+            "next_id": _next_unit_id(units)}
+
+
+def _next_unit_id(units: list[dict]) -> str:
+    nums = []
+    for u in units:
+        m = re.match(r"U(\d+)", u.get("id") or "")
+        if m:
+            nums.append(int(m.group(1)))
+    return f"U{(max(nums) + 1) if nums else 1:02d}"
+
+
+class UnitCreateIn(BaseModel):
+    project: str
+    id: str
+    title: str
+    chapters: list[int] = []
+
+
+@router.post("/units/create")
+def unit_create(body: UnitCreateIn):
+    cfg = appstate.load_config()
+    d = _proj(cfg, body.project)
+    units = appstate.read_units_registry(d)
+    if not re.match(r"^U\d+$", body.id):
+        raise HTTPException(400, "单元 id 形如 U07")
+    if any(u["id"] == body.id for u in units):
+        raise HTTPException(400, f"单元 id 已存在：{body.id}")
+    chs = sorted({int(c) for c in body.chapters})
+    for u in units:
+        if set(u.get("chapters", [])) & set(chs):
+            raise HTTPException(400, f"章 {sorted(set(u['chapters']) & set(chs))} 已属于单元 {u['id']}")
+    units.append({"id": body.id, "title": body.title.strip() or body.id,
+                  "chapters": chs, "status": "draft",
+                  "story": {}, "sealed_card": None})
+    appstate.write_units_registry(d, units)
+    return {"ok": True, "units": units}
+
+
+class UnitUpdateIn(BaseModel):
+    project: str
+    id: str
+    title: str | None = None
+    chapters: list[int] | None = None
+    story: dict | None = None
+    status: str | None = None   # draft / approved
+
+
+@router.post("/units/update")
+def unit_update(body: UnitUpdateIn):
+    """编辑故事卡/标题/章列表；批准=draft→approved（四行运动弧填全才可批）。"""
+    cfg = appstate.load_config()
+    d = _proj(cfg, body.project)
+    units = appstate.read_units_registry(d)
+    u = next((x for x in units if x["id"] == body.id), None)
+    if not u:
+        raise HTTPException(404, f"单元不存在：{body.id}")
+    if u.get("status") == "sealed":
+        raise HTTPException(400, "已封卡单元不可编辑（L1 记忆已落 units.md）")
+    if body.title is not None:
+        u["title"] = body.title.strip() or u["title"]
+    if body.chapters is not None:
+        chs = sorted({int(c) for c in body.chapters})
+        for x in units:
+            if x["id"] != body.id and set(x.get("chapters", [])) & set(chs):
+                raise HTTPException(400, f"章冲突：单元 {x['id']}")
+        u["chapters"] = chs
+    if body.story is not None:
+        u["story"] = body.story
+    if body.status == "approved":
+        story = u.get("story") or {}
+        if not all(story.get(k, "").strip() for k in ("kai", "tui", "zhe", "luo")):
+            raise HTTPException(400, "故事卡四行运动弧（开端/推进/转折/落点）填全才能批准——故事卡不压缩")
+        u["status"] = "approved"
+    elif body.status == "draft":
+        u["status"] = "draft"
+    appstate.write_units_registry(d, units)
+    return {"ok": True, "units": units}
+
+
+class UnitDraftIn(BaseModel):
+    project: str
+    direction: str = ""
+
+
+@router.post("/units/draft")
+def unit_draft(body: UnitDraftIn):
+    """🤖 故事卡草拟：大纲尾部+上一张 L1 卡+用户方向 → 四行运动弧候选
+    （单发调用，不落盘——人审编辑后自己保存）。"""
+    cfg = appstate.load_config()
+    d = _proj(cfg, body.project)
+    outline = d / "outline.md"
+    src = outline if outline.is_file() else d / "outline" / "总大纲.md"
+    tail = ""
+    if src.is_file():
+        tail = src.read_text(encoding="utf-8", errors="ignore")[-3000:]
+    cards = appstate.units_md_cards(d)
+    last_card = cards[-1]["body"][:400] if cards else "（无——本单元是第一个）"
+    prompt = ("你是网文单元故事卡起草助手。根据大纲尾部、上一张单元卡和创作方向，"
+              "起草下一张单元故事卡。只输出 JSON："
+              '{"kai":"开端（一行运动）","tui":"推进","zhe":"转折","luo":"落点",'
+              '"hook":"单元末钩子","refs":"涉及术语/伏笔","band":"预期长度带如 2500-4500"}'
+              "\n\n【大纲尾部】\n" + tail
+              + "\n\n【上一张单元卡】\n" + last_card
+              + "\n\n【创作方向】\n" + (body.direction.strip() or "（未填——按大纲走向）")
+              + "\n\n纪律：运动弧写四行运动不压缩；钩子是下限不是终点；"
+              "每个运动留呼吸点。")
+    result = _rc._do_model(cfg, "write", f"unitdraft-{uuid.uuid4().hex[:8]}",
+                           prompt, 900, True)
+    try:
+        cand = result["json"]
+    except (KeyError, TypeError):
+        raise HTTPException(502, "故事卡草拟未返回可解析 JSON")
+    return {"candidate": cand}
+
+
+class UnitSealDraftIn(BaseModel):
+    project: str
+    id: str
+
+
+@router.post("/units/seal_draft")
+def unit_seal_draft(body: UnitSealDraftIn):
+    """🤖 封卡草拟：故事卡+单元内各章全文 → 150-250 字 L1 卡候选
+    （单发调用，不落盘——人审编辑后自己确认）。"""
+    cfg = appstate.load_config()
+    d = _proj(cfg, body.project)
+    units = appstate.read_units_registry(d)
+    u = next((x for x in units if x["id"] == body.id), None)
+    if not u:
+        raise HTTPException(404, f"单元不存在：{body.id}")
+    texts = []
+    for c in u.get("chapters", []):
+        f = _chapter_file(d, int(c))
+        if not f:
+            raise HTTPException(400, f"第 {c} 章未交付——单元内全章交付后才能封卡")
+        texts.append(f"【第{c}章 {f.stem}】\n"
+                     + f.read_text(encoding="utf-8", errors="ignore")[:7000])
+    story = u.get("story") or {}
+    story_txt = "／".join(filter(None, [story.get(k, "")
+                                        for k in ("kai", "tui", "zhe", "luo")]))
+    prompt = ("你是网文单元卡收束助手。根据单元故事卡和单元内各章全文，写一张 "
+              "L1 单元卡：150-250 字，覆盖——本单元事件链（含结果）、情绪终点、"
+              "新伏笔/线头、出场人物。只输出 JSON："
+              '{"card": "...", "current_hint": "覆盖式快照建议（故事内时间/'
+              '资产变化/未决线头，80 字内）"}'
+              "\n\n【故事卡】\n" + (story_txt or "（无）")
+              + "\n\n【各章全文】\n" + "\n\n".join(texts))
+    result = _rc._do_model(cfg, "write", f"unitseal-{uuid.uuid4().hex[:8]}",
+                           prompt, 800, True)
+    try:
+        cand = result["json"]
+    except (KeyError, TypeError):
+        raise HTTPException(502, "封卡草拟未返回可解析 JSON")
+    return {"candidate": cand}
+
+
+class UnitSealConfirmIn(BaseModel):
+    project: str
+    id: str
+    card: str
+    checklist: dict = {}   # 四道过滤+跳读测试（人工勾选，仅记录不判定）
+
+
+@router.post("/units/seal_confirm")
+def unit_seal_confirm(body: UnitSealConfirmIn):
+    """确认封卡：checklist 全勾才收（记录即约束——人工工序不判定但必须
+    留痕）；卡追加 memory/units.md（L1，原生格式，会话互通）；注册表→sealed。"""
+    required = ["跳读测试", "对话出声读", "人格锚点对照", "讲古打断", "情绪停留"]
+    missing = [k for k in required if not body.checklist.get(k)]
+    if missing:
+        raise HTTPException(400, "封卡前未勾：" + "、".join(missing)
+                            + "——人工工序不判定但必须留痕")
+    if not body.card.strip():
+        raise HTTPException(400, "卡文为空——先草拟或手写")
+    cfg = appstate.load_config()
+    d = _proj(cfg, body.project)
+    units = appstate.read_units_registry(d)
+    u = next((x for x in units if x["id"] == body.id), None)
+    if not u:
+        raise HTTPException(404, f"单元不存在：{body.id}")
+    if u.get("status") == "sealed":
+        raise HTTPException(400, "该单元已封卡")
+    appstate.units_md_append(d, body.id, u.get("title") or body.id, body.card)
+    u["status"] = "sealed"
+    u["sealed_card"] = body.card.strip()
+    u["checklist"] = body.checklist
+    appstate.write_units_registry(d, units)
+    return {"ok": True, "cards": len(appstate.units_md_cards(d))}
+
+
 @router.get("/pipeline")
 def pipeline_view(project: str, chapter: int = 0):
     """管线示波器（v0.13.9）：管线声明 + 交付会话记录摘要（泳道只读视图）。

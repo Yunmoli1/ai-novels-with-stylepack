@@ -267,6 +267,20 @@ def assemble(project_dir: Path, pack_dir: Path, chapter_no: int,
     except Exception:  # noqa: BLE001 —— 记忆是增强，绝不阻断装配
         pass
 
+    # 记忆·单元卡（v0.13.14）：memory/units.md（L1，泰拉灾厄原生格式，会话
+    # 互通）最后 2 张——跨单元边界的前情主粮。无文件静默跳过。
+    try:
+        import appstate  # noqa: E402 —— 延迟导入（web/ 已入 sys.path）
+        cards = appstate.units_md_cards(project_dir)
+        if cards:
+            recent = cards[-2:]
+            txt = "\n\n".join(f"{c['id']}《{c['title']}》：{c['body']}"
+                              for c in recent)
+            items.append({"kind": "记忆·单元卡", "source": "memory/units.md",
+                          "text": txt[:900], "trimmable": True, "prio": 1})
+    except Exception:  # noqa: BLE001
+        pass
+
     # 预算裁剪：只裁 trimmable；v0.9.2 按 prio 从高到低裁
     # （先裁"关联"，再"命中"，常驻最后——重要记忆活到最后）
     def tok(x: dict) -> int:

@@ -84,6 +84,73 @@ def resolve_route(cfg: dict, route: str) -> tuple[dict | None, str | None]:
     return None, None
 
 
+# ---- 单元卡（v0.13.14）：两级单位——单元=运动=1~N 章=发布=验收=记忆单位。
+# 注册表（工作台侧状态）存 style/workbench.json 的 units；L1 记忆（会话侧
+# 互通）写 memory/units.md（## Uxx《题》+150-250 字，泰拉灾厄原生格式）。
+UNIT_HEAD = None  # 延迟编译（见下）
+
+
+def _unit_head_re():
+    global UNIT_HEAD
+    if UNIT_HEAD is None:
+        import re as _re
+        UNIT_HEAD = _re.compile(r"^## (U\d+)《(.+?)》\s*$", _re.M)
+    return UNIT_HEAD
+
+
+def read_units_registry(d: Path) -> list[dict]:
+    wb = d / "style" / "workbench.json"
+    if not wb.is_file():
+        return []
+    try:
+        wj = json.loads(wb.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    units = wj.get("units") or []
+    return units if isinstance(units, list) else []
+
+
+def write_units_registry(d: Path, units: list[dict]) -> None:
+    wbdir = d / "style"
+    wbdir.mkdir(parents=True, exist_ok=True)
+    wb = wbdir / "workbench.json"
+    wj = {}
+    if wb.is_file():
+        try:
+            wj = json.loads(wb.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            wj = {}
+    wj["units"] = units
+    wb.write_text(json.dumps(wj, ensure_ascii=False, indent=2) + "\n",
+                  encoding="utf-8", newline="\n")
+
+
+def units_md_cards(d: Path) -> list[dict]:
+    """memory/units.md → [{id, title, body}]（L1 单元卡，原生格式）。"""
+    p = d / "memory" / "units.md"
+    if not p.is_file():
+        return []
+    text = p.read_text(encoding="utf-8", errors="ignore")
+    ms = list(_unit_head_re().finditer(text))
+    out = []
+    for i, m in enumerate(ms):
+        end = ms[i + 1].start() if i + 1 < len(ms) else len(text)
+        out.append({"id": m.group(1), "title": m.group(2),
+                    "body": text[m.end():end].strip()})
+    return out
+
+
+def units_md_append(d: Path, uid: str, title: str, card: str) -> int:
+    """封卡：追加一条 L1 单元卡（空行分隔），返回追加后卡数。"""
+    p = d / "memory" / "units.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    cur = p.read_text(encoding="utf-8", errors="ignore") if p.is_file() else ""
+    block = f"## {uid}《{title}》\n\n{card.strip()}\n"
+    p.write_text((cur.rstrip("\n") + "\n\n" if cur.strip() else "") + block,
+                 encoding="utf-8", newline="\n")
+    return len(units_md_cards(d))
+
+
 # ---- 思考档（v0.13.8）：路由条目可选 thinking=off/low/medium/high + thinking_json。
 # L1 主机映射：认得出的家按自家参数形态发；认不出的主机（中转站常态）走
 # OpenAI reasoning_effort 形态——由 L2 探针验真伪，L3 运行时 400 自动去参兜底。

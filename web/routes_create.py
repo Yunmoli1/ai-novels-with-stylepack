@@ -85,6 +85,31 @@ def _pack_dir_checked(d: Path, pack: str) -> Path:
     return d
 
 
+def _story_card_text(project_dir: Path, chapter_no: int) -> str:
+    """已批准单元卡注入（v0.13.14，故事卡不压缩——四行运动弧全文进提示词）。
+    本章不属于任何单元 / 单元未批准 → 返回空（不拦生成）。"""
+    for u in appstate.read_units_registry(project_dir):
+        if chapter_no in (u.get("chapters") or []):
+            if u.get("status") != "approved":
+                return ""
+            s = u.get("story") or {}
+            lines = [f"{label}：{s.get(k, '').strip()}"
+                     for k, label in (("kai", "开端"), ("tui", "推进"),
+                                      ("zhe", "转折"), ("luo", "落点"))
+                     if s.get(k, "").strip()]
+            if not lines:
+                return ""
+            tail = "｜".join(x for x in (
+                f"钩子：{s.get('hook', '').strip()}" if s.get("hook", "").strip() else "",
+                f"涉及：{s.get('refs', '').strip()}" if s.get("refs", "").strip() else "",
+                f"长度带：{s.get('band', '').strip()}" if s.get("band", "").strip() else "",
+            ) if x)
+            return (f"【单元故事卡（已批准）｜{u['id']}《{u.get('title', '')}】——"
+                    "按四行运动弧展开，钩子之后允许收尾呼吸】\n"
+                    + "\n".join(lines) + (("\n" + tail) if tail else ""))
+    return ""
+
+
 def _ref_pack_dirs(cfg: dict, project: str,
                    ref_packs: list[str]) -> list[Path]:
     """参考池名列表 → 目录（v0.13.13；上限 3——棘轮风险与参考数正相关）。"""
@@ -734,6 +759,9 @@ def _prep_generate(cfg: dict, body: GenerateIn) -> dict:
     g0t = _g0_text(getattr(body, "g0", None))
     if g0t:
         prompt = prompt + chr(10) * 2 + g0t
+    sc = _story_card_text(project_dir, body.chapter_no)
+    if sc:
+        prompt = prompt + chr(10) * 2 + sc
     return {"pack_dir": pack_dir, "project_dir": project_dir,
             "ref_dirs": ref_dirs,
             "assembly": assembly, "prompt": prompt, "route":

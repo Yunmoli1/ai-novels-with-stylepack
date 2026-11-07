@@ -27,6 +27,7 @@
   <button class="btn ghost" id="btn_ho" style="display:none" onclick="handoverDoc()">交接汇总</button>
   <button class="btn ghost" id="btn_batch" style="display:none" onclick="batchPlan()">量产连跑</button>
   <button class="btn ghost" id="btn_forge" style="display:none" onclick="forgeOpen()">设定工坊</button>
+  <button class="btn ghost" id="btn_units" style="display:none" onclick="unitOpen()">单元卡</button>
   <button class="btn ghost" id="btn_pipe" onclick="pipeToggle()">管线</button>
   <a class="btn ghost" href="/app/history">看板/历史</a>
   <a class="btn ghost" href="/app/bible">档案编辑器</a>
@@ -61,6 +62,21 @@
     <button class="btn" onclick="forgeSave()">落盘选中项（同名=替换，其余逐字保留）</button>
     <span id="forge_out" class="meta"></span>
   </div>
+</div>
+
+<div id="unitsbox" class="panel" style="display:none">
+  <h3 style="margin-top:0">单元卡（单元=运动=1~N 章=发布=验收=记忆单位；章不需要完整，单元才需要）</h3>
+  <div class="genrow">
+    <button class="btn ghost" onclick="unitNewForm()">＋ 新单元</button>
+    <span id="units_out" class="meta"></span>
+  </div>
+  <div id="unit_new" class="panel" style="display:none">
+    <label>单元 id <input id="unit_new_id" style="width:80px"></label>
+    <label>单元题 <input id="unit_new_title" style="width:220px"></label>
+    <label>章号（逗号分隔）<input id="unit_new_chs" style="width:160px" placeholder="如 17,18"></label>
+    <button class="btn" onclick="unitCreate()">创建（草稿）</button>
+  </div>
+  <div id="units_list"></div>
 </div>
 
 <div class="serial-grid">
@@ -176,6 +192,7 @@
 </aside>
 </div><!-- /serial-grid -->
 
+<script src="/static/units.js?v={{ version or '?' }}"></script>
 <script src="/static/creation.js?v={{ version or '?' }}"></script>
 <script>
 // ---- 连载台专有：项目文件树（只读 + 复用既有执法端点 + OS 逃生门）----
