@@ -99,6 +99,9 @@ async function init() {
   loadPresets();
   loadSlots();
   renderOnboard(d);
+  // v0.13.11：冷加载也要走完整初始化——next_chapter 建议、G0 面板、
+  // 表单恢复（switchProject 内部再跑一次 formRestore，以它为准）
+  if ($('project') && $('project').value) await switchProject();
 }
 async function renderOnboard(d) {
   if (!$('ob_steps')) return;  // 连载台无引导面板（分区共存：缺元素即跳过）
@@ -378,6 +381,7 @@ async function loadG0() {
     if (!d.longform) return;
     S.g0info = d; S.g0 = { ...(d.brief || {}) };
     if (!S.g0.chapter_type) S.g0.chapter_type = 'mass';  // C-4：默认量产章
+    g0RestoreOverlay();  // 服务器简报为底，叠加未生成过的本地编辑
     renderG0();
   } catch (e) {}
 }
@@ -429,7 +433,40 @@ function g0Input() {
   if (!S.g0) return;
   G0_FIELDS.forEach(([k]) => { const el = $('g0_' + k); if (el) S.g0[k] = el.value; });
   const ct = $('g0_ctype'); if (ct) S.g0.chapter_type = ct.value;
+  g0Save();  // 编辑即持久（表单记忆同款：未生成的半成品不丢）
   $('btn_generate').disabled = !g0Ready();
+}
+function g0Save() {  // G0 编辑持久：per 项目+章（stylepack.g0）
+  if (PAGE !== 'serial') return;
+  const proj = $('project') && $('project').value;
+  const chap = +$('chapter_no').value || 0;
+  if (!proj || !chap || !S.g0) return;
+  let all = {};
+  try { all = JSON.parse(loadState('g0') || '{}'); } catch (e) {}
+  all[proj] = all[proj] || {};
+  all[proj][chap] = S.g0;
+  saveState('g0', JSON.stringify(all));
+}
+function g0RestoreOverlay() {  // 服务器简报为底，本地未生成编辑叠加
+  if (PAGE !== 'serial') return;
+  const proj = $('project') && $('project').value;
+  const chap = +$('chapter_no').value || 0;
+  if (!proj || !chap || !S.g0) return;
+  let all = {};
+  try { all = JSON.parse(loadState('g0') || '{}'); } catch (e) {}
+  const saved = (all[proj] || {})[chap];
+  if (!saved) return;
+  Object.keys(saved).forEach(k => { if (saved[k]) S.g0[k] = saved[k]; });
+}
+function g0ClearDelivery() {  // 交付=简报转正，清该章编辑记忆（下次是干净的新章）
+  const proj = $('project') && $('project').value;
+  const chap = +$('chapter_no').value || 0;
+  if (!proj || !chap) return;
+  let all = {};
+  try { all = JSON.parse(loadState('g0') || '{}'); } catch (e) {}
+  if (all[proj]) { delete all[proj][chap];
+    if (!Object.keys(all[proj]).length) delete all[proj]; }
+  saveState('g0', JSON.stringify(all));
 }
 // ---- 预算三态（v0.11.2 C-3）：预警闸/止损闸/三出路 ----
 function budgetBlocked() {
@@ -1135,6 +1172,7 @@ async function doSave() {
   memoryDelta();  // 交付后自动登记（隔离区）
   pipeLoad();     // 管线示波器刷新（开着的才真刷——pipeLoad 自带守卫）
   formSaveAfterDelivery();  // 表单记忆：题/词/章号随交付转正，下次回页是新章
+  g0ClearDelivery();        // G0 编辑记忆同步清账
 }
 // ---- 局部改写 / 导出（v0.9.3）----
 async function rewriteFragment(i) {
@@ -1354,10 +1392,15 @@ function pipeStep(id) { PIPE_STEP = id; pipeRender(); }
 // 内容类（章节题/关键词=打了一半的半成品）持久，交付时随流程自然清空
 // （显式清理挂在交付事件上——0.13.7 原则：半成品是花过 token/心思的成果）。
 const FORM_IDS = ['pack', 'chapter_no', 'title', 'keywords', 'char_tier',
-                  'target_chars'];
+                  'target_chars', 'tone_note', 'canon_anchor', 'n_drafts',
+                  'use_stream'];
 function formRead() {
   const o = {};
-  FORM_IDS.forEach(id => { const el = $(id); if (el) o[id] = el.value; });
+  FORM_IDS.forEach(id => {
+    const el = $(id);
+    if (!el) return;
+    o[id] = el.type === 'checkbox' ? el.checked : el.value;
+  });
   return o;
 }
 function formSave() {
@@ -1378,6 +1421,7 @@ function formRestore() {
   FORM_IDS.forEach(id => {
     const el = $(id);
     if (!el || f[id] === undefined || f[id] === null) return;
+    if (el.type === 'checkbox') { el.checked = !!f[id]; return; }
     if (el.tagName === 'SELECT'
         && ![...el.options].some(o => o.value === f[id])) return;  // 失效退化
     if (id === 'chapter_no' || id === 'target_chars') {

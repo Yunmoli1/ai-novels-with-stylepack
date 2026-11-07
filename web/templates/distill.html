@@ -133,10 +133,10 @@ python scripts/build_delta.py downloads/corpus/&lt;语料集&gt; --pack stylepac
         <label><input type="checkbox" class="arm_cb" value="both"> 风格+canon</label>
         <label><input type="checkbox" class="arm_cb" value="plain" checked> 裸模型</label>
       </span></label>
-    <label>canon 包 <select id="blind_canon" style="max-width:160px"><option value="">（未选）</option></select></label>
-    <label>轮数 <input id="blind_rounds" type="number" value="3" min="1" max="8" style="width:60px"></label>
+    <label>canon 包 <select id="blind_canon" style="max-width:160px" onchange="blindParamSave()"><option value="">（未选）</option></select></label>
+    <label>轮数 <input id="blind_rounds" type="number" value="3" min="1" max="8" style="width:60px" oninput="blindParamSave()"></label>
     <label>题目勾选（1-based，逗号分隔，留空=取前 N 题）
-      <input id="blind_topics" placeholder="如 1,3" style="width:110px"></label>
+      <input id="blind_topics" placeholder="如 1,3" style="width:110px" oninput="blindParamSave()"></label>
     <button class="btn" id="btn_blind" onclick="blindStart()">生成盲测对局</button>
   </div>
   <p class="meta">每题按臂位各生成一段、打乱甲乙丙丁——你来盲选；风格臂问"哪段像作者"，
@@ -199,10 +199,15 @@ async function loadCorpus() {
   (d.authors || []).forEach(a => (a.works || []).forEach(w =>
     opts.push(`<option value="${esc(w.dir)}">${esc(a.name)} / ${esc(w.name)}（${w.samples} 样本${w.has_stats ? '，有 stats' : ''}）</option>`)));
   $('corpus_sel').innerHTML = opts.join('') || '<option value="">（downloads/corpus 为空——先入库）</option>';
+  try {  // v0.13.11 记忆：上次用的语料集（失效自动回首项）
+    const c = localStorage.getItem('stylepack.distill.corpus');
+    if (c && [...$('corpus_sel').options].some(o => o.value === c)) $('corpus_sel').value = c;
+  } catch (e) {}
   showSamples();
 }
 async function showSamples() {
   const dir = $('corpus_sel').value;
+  try { localStorage.setItem('stylepack.distill.corpus', dir || ''); } catch (e) {}
   S.curDir = dir; S.exclude = new Set();
   $('samplebox').style.display = dir ? '' : 'none';
   if (!dir) return;
@@ -478,6 +483,20 @@ async function loadBlindConfig() {
     $('blind_canon').innerHTML = '<option value="">（未选）</option>'
       + cps.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
   } catch (e) {}
+  try {  // v0.13.11 记忆：盲测参数（轮数/主题/canon——失效回默认）
+    const b = JSON.parse(localStorage.getItem('stylepack.distill.blind') || 'null');
+    if (b) {
+      if (b.canon && [...$('blind_canon').options].some(o => o.value === b.canon))
+        $('blind_canon').value = b.canon;
+      if (b.rounds && +b.rounds >= 1 && +b.rounds <= 8) $('blind_rounds').value = b.rounds;
+      if (b.topics !== undefined) $('blind_topics').value = b.topics;
+    }
+  } catch (e) {}
+}
+function blindParamSave() {  // v0.13.11 盲测参数即时持久（输入即存）
+  try { localStorage.setItem('stylepack.distill.blind', JSON.stringify(
+    { canon: $('blind_canon').value || '', rounds: $('blind_rounds').value,
+      topics: $('blind_topics').value || '' })); } catch (e) {}
 }
 function armLabel(a) {
   return { style: '风格包', canon: 'canon 包', both: '风格+canon', plain: '裸模型' }[a] || a;
@@ -491,6 +510,9 @@ async function blindStart() {
   if ((arms.includes('canon') || arms.includes('both')) && !canon)
     return alert('臂位含 canon/混合——请选 canon 包');
   const rounds = Math.max(1, Math.min(8, +$('blind_rounds').value || 3));
+  try { localStorage.setItem('stylepack.distill.blind', JSON.stringify(
+    { canon: $('blind_canon').value || '', rounds: $('blind_rounds').value,
+      topics: $('blind_topics').value || '' })); } catch (e) {}
   const topicIds = ($('blind_topics').value || '').split(/[,,]/)
     .map(s => +s.trim()).filter(n => n >= 1);
   const calls = rounds * arms.length + 3;

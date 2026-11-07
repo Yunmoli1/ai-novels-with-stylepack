@@ -46,10 +46,10 @@
 
 <div id="forgebox" class="panel" style="display:none">
   <h3 style="margin-top:0">设定工坊（设定版装配——块级生成，人审后落盘直进约束面板）</h3>
-  <label>创作方向（题材/一句话/要求）<textarea id="forge_brief" rows="2" style="width:100%" placeholder="例：灰港雾都的驱灵故事，主角是欠债的年轻巡夜人"></textarea></label>
-  <label>参考资料（可选——同人原作资料/散稿，粘贴此处，生成会取材但不照抄）<textarea id="forge_material" rows="2" style="width:100%"></textarea></label>
+  <label>创作方向（题材/一句话/要求）<textarea id="forge_brief" rows="2" style="width:100%" placeholder="例：灰港雾都的驱灵故事，主角是欠债的年轻巡夜人" oninput="forgeMatSave()"></textarea></label>
+  <label>参考资料（可选——同人原作资料/散稿，粘贴此处，生成会取材但不照抄）<textarea id="forge_material" rows="2" style="width:100%" oninput="forgeMatSave()"></textarea></label>
   <div class="genrow">
-    <label>canon 锚定 <select id="forge_canon"><option value="">（不锚定）</option></select></label>
+    <label>canon 锚定 <select id="forge_canon" onchange="forgeMatSave()"><option value="">（不锚定）</option></select></label>
     <button class="btn ghost" onclick="forgeGen('world')">生成世界观块</button>
     <button class="btn ghost" onclick="forgeGen('chars')">生成人物卡</button>
     <button class="btn ghost" onclick="forgeGen('outline')">生成卷纲骨架</button>
@@ -332,12 +332,25 @@ async function forgeOpen() {
           || 'null') || { world: [], chars: [], outline: [] }; }
     catch (e) { S.forge = { world: [], chars: [], outline: [] }; }
   }
+  { // v0.13.11 原料区持久（创作方向/参考资料/canon 锚定——打了一半的半成品）
+    const mat = S.forge.mat || {};
+    document.getElementById('forge_brief').value = mat.brief || '';
+    document.getElementById('forge_material').value = mat.material || '';
+    document.getElementById('forge_canon').value = mat.canon || '';  // 无此项=回默认
+  }
   let savedTab = 'world';
   try { savedTab = localStorage.getItem('stylepack.forge.tab') || 'world'; } catch (e) {}
   S.forgeTab = S.forgeTab || savedTab;
   if (!S.forge[S.forgeTab]) S.forge[S.forgeTab] = [];
   renderForgeCands();
   document.getElementById('forgebox').scrollIntoView({ behavior: 'smooth' });
+}
+function forgeMatSave() {  // v0.13.11 原料区即时持久（输入即存，同表单约定）
+  if (!S.forge) S.forge = { world: [], chars: [], outline: [] };
+  S.forge.mat = { brief: document.getElementById('forge_brief').value,
+    canon: document.getElementById('forge_canon').value || '',
+    material: document.getElementById('forge_material').value };
+  saveForgeState();
 }
 function saveForgeState() {
   try {
@@ -388,6 +401,10 @@ async function forgeGen(kind) {
   const body = { project: document.getElementById('project').value, brief,
     canon_pack: document.getElementById('forge_canon').value || null,
     material: document.getElementById('forge_material').value };
+  S.forge.mat = { brief: document.getElementById('forge_brief').value,
+    canon: document.getElementById('forge_canon').value || '',
+    material: document.getElementById('forge_material').value };
+  saveForgeState();  // 原料区持久（生成即留痕——换页回来不重填）
   if (kind === 'world') body.n = 4;
   if (kind === 'chars') body.n = 3;
   if (kind === 'outline') body.n_volumes = 1;

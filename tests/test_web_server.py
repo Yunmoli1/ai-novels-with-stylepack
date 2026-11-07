@@ -1810,8 +1810,18 @@ class TestWebServer(unittest.TestCase):
                      "formSaveAfterDelivery();", "formRestore();  // 表单跨页记忆"):
             self.assertIn(mark, cr_js, f"表单记忆缺挂钩：{mark}")
         for fid in ("pack", "chapter_no", "title", "keywords",
-                    "char_tier", "target_chars"):
+                    "char_tier", "target_chars", "tone_note", "canon_anchor",
+                    "n_drafts", "use_stream"):
             self.assertIn(f"'{fid}'", cr_js)
+        # v0.13.11 补漏：G0 编辑持久（三函数）+ 工坊原料 + 蒸馏语料/盲测参数
+        for mark in ("function g0Save", "function g0RestoreOverlay",
+                     "function g0ClearDelivery", "g0ClearDelivery();"):
+            self.assertIn(mark, cr_js, f"G0 记忆缺挂钩：{mark}")
+        serial_js = (S / "web" / "templates" / "serial.html").read_text(encoding="utf-8")
+        self.assertIn("S.forge.mat", serial_js, "工坊原料区未持久")
+        distill_html = (S / "web" / "templates" / "distill.html").read_text(encoding="utf-8")
+        self.assertIn("stylepack.distill.corpus", distill_html, "蒸馏语料集未持久")
+        self.assertIn("stylepack.distill.blind", distill_html, "盲测参数未持久")
         # 树：顶层目录 + 来源标注
         t = self.client.get("/app/api/serial/tree",
                             params={"project": "测试项目"}).json()
