@@ -237,16 +237,17 @@ def _project_local_packs(d: Path) -> list[dict]:
 
 
 def _global_pack_names() -> list[str]:
+    """全局/local 包名（local/ 根部无 pack.json——子目录才是包，先分支再过滤）。"""
     names = []
     if _rc.STYLEPACKS.is_dir():
         for pdir in sorted(_rc.STYLEPACKS.iterdir()):
-            if not pdir.is_dir() or not (pdir / "pack.json").is_file():
+            if not pdir.is_dir():
                 continue
             if pdir.name == "local":
                 for sub in sorted(pdir.iterdir()):
                     if sub.is_dir() and (sub / "pack.json").is_file():
                         names.append(f"local/{sub.name}")
-            else:
+            elif (pdir / "pack.json").is_file():
                 names.append(pdir.name)
     return names
 
