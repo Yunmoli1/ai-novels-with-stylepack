@@ -7,4 +7,4 @@ StylePack 是**本地工具**：
   页面永不回显、日志与报错会脱敏——但请自行确保该文件不进任何同步盘/备份的公开目录
 - 本地语料与生成内容（manuscript/sessions/slots）不入 git 仓库
 
-发现安全问题请勿开公开 issue，通过 [Security Advisories](https://github.com/Yunmoli1/stylepack/security/advisories) 联系。
+发现安全问题请勿开公开 issue，通过 [Security Advisories](https://github.com/Yunmoli1/ai-novels-with-stylepack/security/advisories) 联系。

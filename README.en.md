@@ -6,7 +6,7 @@
 
 Quantified fingerprints · Self-contained style packs · Local workbench · Verifiable
 
-[![CI](https://github.com/Yunmoli1/stylepack/actions/workflows/ci.yml/badge.svg)](https://github.com/Yunmoli1/stylepack/actions/workflows/ci.yml)
+[![CI](https://github.com/Yunmoli1/ai-novels-with-stylepack/actions/workflows/ci.yml/badge.svg)](https://github.com/Yunmoli1/ai-novels-with-stylepack/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-3776ab.svg)](https://www.python.org)
 [![Engine: 0 deps](https://img.shields.io/badge/engine-0%20dependencies-green.svg)](README.md)
@@ -100,7 +100,7 @@ stay invisible to consumers until validated and published.
 **A. Local workbench (easiest)**
 
 ```bash
-git clone https://github.com/Yunmoli1/stylepack.git
+git clone https://github.com/Yunmoli1/ai-novels-with-stylepack.git
 cd stylepack
 # double-click 启动工作台.bat (auto-installs web deps, opens the browser)
 # onboarding: API key → model → new project → first chapter

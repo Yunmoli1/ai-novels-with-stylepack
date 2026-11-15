@@ -6,7 +6,7 @@
 
 量化指纹 · 自包含风格包 · 本地工作台 · 可验收
 
-[![CI](https://github.com/Yunmoli1/stylepack/actions/workflows/ci.yml/badge.svg)](https://github.com/Yunmoli1/stylepack/actions/workflows/ci.yml)
+[![CI](https://github.com/Yunmoli1/ai-novels-with-stylepack/actions/workflows/ci.yml/badge.svg)](https://github.com/Yunmoli1/ai-novels-with-stylepack/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-3776ab.svg)](https://www.python.org)
 [![Engine: 0 deps](https://img.shields.io/badge/engine-0%20dependencies-green.svg)](#设计原则)
@@ -94,7 +94,7 @@ API key，即可蒸馏新作者、写章节、跑盲测。仅监听 127.0.0.1，
 **姿势 A：本地工作台（最简单）**
 
 ```bash
-git clone https://github.com/Yunmoli1/stylepack.git
+git clone https://github.com/Yunmoli1/ai-novels-with-stylepack.git
 cd stylepack
 # 双击 启动工作台.bat（首次自动装 web 依赖并打开浏览器）
 # 引导四步：配 key → 选模型 → 新建项目 → 写第一章
