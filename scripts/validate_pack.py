@@ -55,6 +55,21 @@ INJECTION_PATTERNS = [
 ]
 
 
+def _pack_sections_lang(pack_dir: Path) -> str:
+    """包语言（pack.json.language，缺省 zh）——决定 profile/thought 的节名口径。
+
+    v0.13.17：结构（节数与顺序）是契约，节名按包语言；英文包用英文节名，
+    中文包不受影响（既有 200+ 用例锁定）。"""
+    pj_path = pack_dir / "pack.json"
+    if not pj_path.is_file():
+        return splib.LANG_ZH
+    try:
+        pj = splib.load_json(pj_path)
+    except Exception:  # noqa: BLE001
+        return splib.LANG_ZH
+    return splib.normalize_lang((pj or {}).get("language") or splib.LANG_ZH)
+
+
 def check_pack(pack_dir: Path) -> tuple[list[str], list[str]]:
     """按 pack.json.kind 分派：canon 包走 canon 检查，其余走风格包检查。"""
     kind = "style"
@@ -137,6 +152,19 @@ def _check_style_pack(pack_dir: Path) -> tuple[list[str], list[str]]:
             errors.append(f"fingerprint.json 无法解析：{e}")
             fj = None
         if fj is not None:
+            # v0.13.17 语言一致性：指纹 language 决定验收时的量纲与标点口径，
+            # 与 pack.json.language 不一致时提示（不判错——历史包可先缺省 zh 后补）
+            try:
+                pack_lang = (splib.load_json(pj_path) if pj_path.is_file() else {}).get("language")
+            except Exception:  # noqa: BLE001
+                pack_lang = None
+            fp_lang = fj.get("language")
+            if fp_lang and pack_lang and (splib.normalize_lang(fp_lang)
+                                          != splib.normalize_lang(pack_lang)):
+                warns.append(f"fingerprint.json language={fp_lang} 与 pack.json.language="
+                             f"{pack_lang} 不一致：验收按指纹语言量纲判定，建议统一")
+            elif fp_lang and not pack_lang:
+                warns.append(f"fingerprint.json 声明 language={fp_lang}，但 pack.json 缺该字段")
             leaves = list(splib.iter_target_leaves(fj.get("metrics", {})))
             if len(leaves) < 5:
                 errors.append(f"fingerprint.json 带容差的指标叶仅 {len(leaves)} 个（至少 5 个）")
@@ -175,11 +203,14 @@ def _check_style_pack(pack_dir: Path) -> tuple[list[str], list[str]]:
                     f"{md.name}：疑似指令注入语句「{m.group(0)[:40]}」——"
                     "第三方风格包按第三方代码对待，合并前必须人工复核语义")
 
-    # G. profile.md 骨架
+    # G. profile.md 骨架（v0.13.17：节名随包语言——结构是契约，标签只是标签）
     profile = pack_dir / "profile.md"
     if profile.is_file():
         text = profile.read_text(encoding="utf-8")
-        for section in splib.PROFILE_SECTIONS:
+        _sections = (splib.PROFILE_SECTIONS_EN
+                     if _pack_sections_lang(pack_dir) == splib.LANG_EN
+                     else splib.PROFILE_SECTIONS)
+        for section in _sections:
             if section not in text:
                 warns.append(f"profile.md 缺少章节：「{section}」")
 
@@ -353,7 +384,8 @@ def _check_registers(pack_dir: Path, errors: list[str], warns: list[str]) -> Non
     regs = [r.strip() for r in REGISTER_HEADING_RE.findall(text)]
 
     # (c) 跨文件查重：分区名 vs profile 章节名 vs exemplars 条目标题
-    clash_pool = list(splib.PROFILE_SECTIONS) + [title for _, title, _ in ex_tones]
+    clash_pool = (list(splib.PROFILE_SECTIONS) + list(splib.PROFILE_SECTIONS_EN)
+                  + [title for _, title, _ in ex_tones])
     for r in regs:
         for other in clash_pool:
             if r and other and (r == other or r in other or other in r):
@@ -422,7 +454,10 @@ def _check_thought(pack_dir: Path, errors: list[str], warns: list[str]) -> None:
         return
 
     text = path.read_text(encoding="utf-8")
-    for section in splib.THOUGHT_SECTIONS:
+    _sections = (splib.THOUGHT_SECTIONS_EN
+                 if _pack_sections_lang(pack_dir) == splib.LANG_EN
+                 else splib.THOUGHT_SECTIONS)
+    for section in _sections:
         if section not in text:
             errors.append(f"thought.md 缺少章节：「{section}」")
     if not splib.MOTIF_LIST_RE.search(text):

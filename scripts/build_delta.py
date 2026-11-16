@@ -50,6 +50,9 @@ def main() -> int:
     ap.add_argument("corpus", help="语料目录（每文件 = 一个样本）")
     ap.add_argument("--pack", required=True, help="风格包目录")
     ap.add_argument("--top-n", type=int, default=150)
+    ap.add_argument("--lang", default="auto", choices=["auto", "zh", "en"],
+                    help="语料语言：auto=按 CJK 占比自动判定（默认），zh/en 强制；"
+                         "决定指纹 language、量纲（字/词）与 Delta 档案类型")
     ap.add_argument("--layered", action="store_true",
                     help="按文体分层重建：genres 阈值树 + 分层 delta_profile + 层内留一 self_check")
     ap.add_argument("--exclude", nargs="*", default=[], metavar="NAME",
@@ -66,25 +69,31 @@ def main() -> int:
         print("错误：语料目录没有文本文件", file=sys.stderr)
         return 2
     named = [(f.stem, splib.read_text(f)[0]) for f in files]
-    profile = splib.build_delta_profile([t for _, t in named], top_n=args.top_n)
+    corpus_text = "\n\n".join(t for _, t in named)
+    use_lang = splib.normalize_lang(args.lang, corpus_text)
+    unit = "词" if use_lang == splib.LANG_EN else "字"
+    print(f"语料语言：{use_lang}（单位={unit}）")
+    profile = splib.build_delta_profile([t for _, t in named], top_n=args.top_n,
+                                        lang=use_lang)
 
     pack = Path(args.pack)
     fp_path = pack / "fingerprint.json"
     fingerprint = splib.load_json(fp_path) if fp_path.is_file() else {}  # 全新包目录直接可用
     fingerprint["delta_profile"] = profile
+    fingerprint["language"] = use_lang
     fingerprint.setdefault("notes", "")
     loo = None
     layers = None
     if args.layered:
-        layers = splib.build_genre_layers(named, top_n=args.top_n)
-        loo = splib.leave_one_out(named, top_n=args.top_n)
+        layers = splib.build_genre_layers(named, top_n=args.top_n, lang=use_lang)
+        loo = splib.leave_one_out(named, top_n=args.top_n, lang=use_lang)
         fingerprint["genres"] = layers["genres"]
         fingerprint["self_check"] = loo
         # 顶层混合 metrics（带容差）+ 完整实测快照——v0.7.2：新蒸馏包不过
         # fp_check 的混合层就从来没被写过，validate 会因无容差叶拒绝定稿
-        fingerprint["metrics"] = splib.derive_thresholds([t for _, t in named])
-        fingerprint["reference"] = splib.compute_metrics(
-            "\n\n".join(t for _, t in named))
+        fingerprint["metrics"] = splib.derive_thresholds([t for _, t in named],
+                                                         lang=use_lang)
+        fingerprint["reference"] = splib.compute_metrics(corpus_text, use_lang)
 
     # 内容变更检测 + 单次写盘 + 元数据联动
     new_text = json.dumps(fingerprint, ensure_ascii=False, indent=2) + "\n"
@@ -92,7 +101,7 @@ def main() -> int:
     changed = old_bytes != new_text.encode("utf-8")
     fp_path.write_text(new_text, encoding="utf-8", newline="\n")
     print(f"Delta 档案已写入 {fp_path}")
-    print(f"  样本数 {profile['n_samples']}，高频字 {profile['top_n']} 个")
+    print(f"  样本数 {profile['n_samples']}，高频{unit} {profile['top_n']} 个")
     if not changed:
         print("  指纹内容无变化，pack.json 版本不动")
 

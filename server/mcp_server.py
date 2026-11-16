@@ -147,13 +147,26 @@ class MCPServer:
         if not text_path.is_absolute():
             text_path = self.project / text_path
         fingerprint = splib.load_json(pack / "fingerprint.json")
+        pack_lang = fingerprint.get("language")
+        if not pack_lang:
+            pj = pack / "pack.json"
+            if pj.is_file():
+                pack_lang = json.loads(pj.read_text(encoding="utf-8")).get("language")
+        pack_lang = splib.normalize_lang(pack_lang or splib.LANG_ZH)
         files = splib.collect_text_files([text_path])
         text = "\n\n".join(splib.read_text(f)[0] for f in files)
         self._chars = splib._clen(text)
         # v0.2.3：与 CLI fp_check 共用分层验收路径（auto 选层 + 真迹包络 + 短文门槛）
         out = splib.layered_check(text, fingerprint,
                                   genre=args.get("genre"),
-                                  delta_max_override=args.get("delta_max"))
+                                  delta_max_override=args.get("delta_max"),
+                                  lang=pack_lang)
+        if out.get("language_mismatch"):
+            return {"pack": pack.name, "ok": False,
+                    "language_mismatch": True,
+                    "pack_language": out["pack_language"],
+                    "text_language": out["text_language"],
+                    "notes": out["notes"], "rows": []}
         return {"pack": pack.name, "genre": out["genre"], "layer_used": out["layer_used"],
                 "ok": out["ok"],
                 "rows": [{k: r[k] for k in ("path", "target", "actual", "ok")}

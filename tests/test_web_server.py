@@ -1277,7 +1277,7 @@ class TestWebServer(unittest.TestCase):
         self.assertEqual(miss.status_code, 404)
 
     def test_ai_cliche_check_script(self):
-        """v0.9.1 AI 腔检测：三档计数 + 密度 + 豁免 + 退出码。"""
+        """v0.9.1 三档计数 + 密度 + 豁免 + 退出码；v0.13.16 加 tier4 结构级。"""
         import ai_cliche_check as acc
         words = acc.load_words()
         self.assertTrue(words["tier1"] and words["tier2"] and words["tier3"])
@@ -1292,6 +1292,28 @@ class TestWebServer(unittest.TestCase):
         self.assertEqual(r2["hits"], 0)
         clean = acc.check("平实的叙述。" * 50, words, set())
         self.assertEqual(clean["verdict"], "ok")
+        # ---- v0.13.16：tier4 结构级（版面棘轮）----
+        pats = acc.load_patterns()
+        self.assertEqual([p["id"] for p in pats],
+                         ["dash_ratchet", "quote_abuse", "short_line"])
+        dash = "他抬头——看着天——又低下头——笑了——走了。" * 20
+        rd = acc.check(dash, words, set(), pats)
+        self.assertEqual(rd["verdict"], "warn")
+        self.assertEqual(rd["structure"][0]["level"], "warn")
+        self.assertGreater(rd["structure"][0]["value"], 12.0)
+        # 引号对密度：单引号字符 / 千字，阈值按对数的两倍计
+        quote = "\u201c\u4f60\u597d\u201d\u3002" * 60
+        rq = acc.check(quote, words, set(), pats)
+        self.assertEqual(rq["structure"][1]["level"], "warn")
+        # 超短行刷屏：连续 12 行每行 ≤6 字
+        short = "\n".join(["走。", "看。", "停。", "笑。"] * 3)
+        rs = acc.check(short, words, set(), pats)
+        self.assertEqual(rs["structure"][2]["level"], "warn")
+        self.assertEqual(rs["verdict"], "warn")
+        # 平实文本：结构级不误报
+        rc = acc.check("平实的叙述。" * 50, words, set(), pats)
+        self.assertEqual(rc["verdict"], "ok")
+        self.assertTrue(all(i["level"] == "ok" for i in rc["structure"]))
         # CLI 入口（退出码 1=发现）
         import subprocess, tempfile as _tf
         with _tf.TemporaryDirectory() as td:
@@ -1302,6 +1324,15 @@ class TestWebServer(unittest.TestCase):
                                  errors="replace", timeout=60)
             self.assertEqual(cli.returncode, 1)
             self.assertIn("AI 腔检测", cli.stdout)
+            # 结构级单独触发：词汇干净但版面棘轮
+            f2 = Path(td) / "d2.md"
+            f2.write_text(dash, encoding="utf-8")
+            cli2 = subprocess.run([sys.executable, str(S / "scripts" / "ai_cliche_check.py"),
+                                   str(f2)], capture_output=True, encoding="utf-8",
+                                  errors="replace", timeout=60)
+            self.assertEqual(cli2.returncode, 1)
+            self.assertIn("结构级", cli2.stdout)
+            self.assertIn("破折号棘轮", cli2.stdout)
 
     def test_memory_delta_merge_recap_assembly(self):
         """v0.9.0 记忆接入：交付登记（judge 提取+脚本风险分级）→ 隔离区分组 →

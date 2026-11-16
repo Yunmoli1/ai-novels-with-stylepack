@@ -2,6 +2,116 @@
 
 所有显著变更记录于此。格式参照 Keep a Changelog，版本遵循 SemVer。
 
+## [0.13.17] - 2026-11-16
+
+### Added（英文作品链路 P0–P4：语言成为包的属性）
+
+用户拍板的四条硬约束先行（见 `ds接手文档及工作记录/验收-2026-11-16-英文链路.md`）：
+只改本工作区；人类基准用公版书**只本地自测、不上 GitHub、不进发行包**；AI 基线
+允许用本项目 API 生成；同步做 UI 且允许「中文界面 + 英文语料」切换。
+
+- **语言层（scripts/splib.py，+414 行）**：`LANG_ZH/LANG_EN` 常量、
+  `PROFILE_SECTIONS_EN`（9 节）/`THOUGHT_SECTIONS_EN`（6 节）；
+  `detect_lang()`（CJK 占比判语言）、`normalize_lang()`（auto → 实测）；
+  `split_sentences_en()` / `words_of()` / `quote_chars_len_en()`——英文**逐段**
+  配对引号（全文配对会让对话段占比全崩）；`_metrics_en()`（句长/段长按**词**、
+  top_words/bigram、标点 per-1k 按**词**）；`compute_metrics(text, lang)`；
+  `build_delta_profile(..., unit="word")` 词级 Delta；`derive_thresholds(lang)`；
+  `metric_keys_for(lang)`（英文用 top_words/bigram 取代叠词/四字格）；
+  **`layered_check(..., lang=)` 语言护栏**：包语言与稿件语言不一致直接判「不可用」，
+  杜绝英文稿拿中文阈值假绿灯；英文短文本门限 `EN_DELTA_MIN_WORDS=400`（不计判定）/
+  `EN_DELTA_STABLE_WORDS=600`（判「置信中」）；
+  `count_motifs(..., lang)`：英文改**每千词 + 词边界**（`(?<![a-z])w(?![a-z])`），
+  中文原样（次/千字、子串）——两种量纲的量分母与 fingerprint 的 per_1k 同源。
+- **五个入口按语言分派**：`scripts/fp_extract.py --lang auto|zh|en`、
+  `scripts/build_delta.py --lang/--layered`、`scripts/fp_check.py`（报告显式标注
+  语言不匹配 + 单位按语言打印「次/千词」）、`scripts/borrow_check.py`
+  （英文按**词窗口**查 ≥N 词搬运，中文仍 12 字逐字重叠）、
+  `scripts/validate_pack.py`（按 `pack.json.language` 选节名校验 profile/thought）、
+  `scripts/motif_count.py --lang`（英文剔除线缺省 0.5/千词，中文仍 1.5/千字）、
+  `server/mcp_server.py` 透传包语言。
+- **示范包 `stylepacks/doyle-en/`（首个英文包，v0.1.1）**：pack.json（Gutenberg
+  #1661，11 段 × ~9.5k 词，561,743 字符，`thought: true`）+ 分层 fingerprint.json
+  （word 级 Delta 150 词、14 项指标、genre narrative 层、self_check LOO）+
+  card/profile/exemplars/lexicon/limits/thought 六个 md + `tests/blind-prompts.md`
+  （4 道英文 A/B 盲测题）。节名逐字取英文常量；`motif 词表：` 行顶格（校验器
+  `MOTIF_LIST_RE` 不认 `##` 前缀）；`registers: false` 故不写 `调子：` 行。
+- **英文 AI 腔门禁（scripts/ai_cliche_words_en.txt 71 条 /
+  ai_cliche_patterns_en.txt 2 条）**：`ai_cliche_check.py` 加
+  `pack_language()` / `detect_lang()` / `count_hits()`（英文词边界、豁免不分大小写）/
+  `VOCAB_BY_LANG={"zh":(1.0,2.0),"en":(0.6,1.2)}` / `--lang auto|zh|en`；
+  web 侧**零改动**——创作与连载两处的门禁调用本来就带 `--pack`，包语言自动生效。
+- **生成环双语（web/）**：`creation.py` 8 个提示词全部加 `lang`（outline/beats/
+  reroll_beat/prose/revise/ending_check/rewrite/memory_digest），中文分支逐字节
+  保持原样；`routes_create.py` 新增 `_pack_language()` / `_project_language()` 并
+  全链透传；`routes_serial.py` 的 `project_packs` 带 `language`；`creation.js`
+  按包语言切换单位（英文按词计字数与批量门禁）+ 语言徽章；`create.html` 加
+  `lang_badge`。
+- **测试**：`tests/test_lang_en.py` 8 个类 39 例（原 7 类 30 例 + 本次
+  `TestEnglishAiCliche` 9 例）；全套 **228 passed, 1 skipped, 9 subtests passed**。
+
+### 标定证据（人类 0 误报是收录前提）
+
+- **语料**：人类 10 部 Gutenberg 公版书（Austen×2 / Carroll / Dickens / Doyle×2 /
+  Melville / Stoker / Twain / Wilde，合计 1.1M 词）+ Doyle 连续标定样本 11 段
+  （561,747 字符 / 105,301 词）+ 本项目 API 生成的英文 AI 基线 11 章。语料只在本机
+  `downloads/corpus_en/`，**不入库**。
+- **包可用性（Doyle Hound，同作者另一本 holdout，59,636 词）**：Delta 0.649，
+  14 项指标过 12，差 `paragraph.dialogue_para_ratio` 与 `punctuation_per_1k.,`；
+  跨作者 Delta 1.20（Dickens）–1.92（Carroll），阈值线 1.331（LOO max）把
+  Melville 1.61 判出界；AI 基线 2.79–3.55 全部失败 → **区分度成立**。
+- **英文 AI 腔规则标定**（每千词，人类 med vs AI med）：em dash 6.21 vs 0.52
+  （**英文方向与中文相反**，中文破折号棘轮绝不能搬）、分号 8.99 vs 0.56、
+  感叹号 5.31 vs 0、省略号字符人类**结构性 0** vs AI 1.12、直引号 `"` 人类
+  **结构性 0**（19 世纪全用弯引号）vs AI 中位 0 → 只收最后两条为结构级
+  （`ellipsis_char` 提示 0.5/警告 2.0，`straight_quote` 提示 2.0/警告 10.0）；
+  词汇级收现代填充词/现代名词/AI 习语三档（okay/phone/`a testament to` 等，
+  人类侧实测命中全 0 或 1）；**不收录** literally/really/just/suddenly/quietly/
+  `seemed to`/`little did`/palpable/myriad/a sea of/found himself 等（人类古典
+  散文常用，just 0.86、seemed to 0.48 → 收了必误报）。
+- **0 误报验收**：人类 10 部书 10/10 `ok`（最高 0.03）、Doyle 11 段 11/11 `ok`
+  （全 0.0）；AI 基线 **10/11 报警**（6 warn + 4 notice 口径），**ch10 漏报**
+  如实记录（该章无现代词与省略号，属词汇级规则的已知盲区）。
+
+### 已知边界（写进 make-or-break 的实话）
+
+- 英文指纹的字符级指标（top_chars / 四字格）在英文下为空数组——这是设计，
+  不是缺数据；中文包不受影响。
+- 短于 400 词的英文稿不进 Delta 判定，400–600 词标「置信中」。
+- 英文 AI 腔词表对「无现代词、无省略号、无直引号」的含蓄 AI 文本会漏报
+  （ch10 即样本）；结构级只收两条，宁漏不误。
+
+## [0.13.16] - 2026-11-16
+
+### Added（AI 腔检测 tier4——结构级「版面棘轮」）
+- **新增 scripts/ai_cliche_patterns.txt（7 列 | 分隔的数据文件）**：词表抓「用了
+  什么词」，tier4 抓「版面长成了什么样」——破折号棘轮（per1k，提示 6 / 警告 12）、
+  引号对密度（per1k，提示 56 / 警告 80，按单引号字符计）、超短行刷屏（chain，连续
+  ≤6 字行，提示 6 / 警告 10）；四种量纲 per1k / ratio / chain / count 由代码实现，
+  扩充只加一行、不改代码（延续 D3：词表数据化，不硬编码）；.gitignore 补白名单
+  （原规则 *.txt 全忽略，只放行 ai_cliche_words.txt / requirements-web.txt）；
+- **scripts/ai_cliche_check.py**：新增 load_patterns() / check_structures()；
+  check(..., patterns=None) 向后兼容（不传规则表时只做词汇级，v0.9.1 调用方不受影响）；
+  总判定取词汇级与结构级**较坏者**；CLI 首行加「｜结构级 ✅/⚠️/❌」并在明细里逐条
+  打印实测值（值 + 量纲 + 提示/警告线）；退出码语义不变（0 通过 1 偏高 2 参数错）；
+- **标定证据（2026-11-16，四组语料）**：人类网文 141 章 / 人类经典 5 篇 /
+  AI 废稿 196 章 / 本项目现行稿 43 章。破折号每千字：人类 max 1.84、现行 max 4.74、
+  废稿中位 22.5（最高 120.2）；引号对每千字：人类 max 23.9、废稿 97–225；
+  超短行最长链：人类 max 3、废稿 6。结构级在废稿上 194/196 章报警，在人类经典、
+  人类网文、现行稿上 **0 误报**；
+- **不收录的规则**（同为实测结论，避免后人重做）：否定-肯定对偶（人写网文 max 0.94/千字，
+  与废稿 1.92 重叠）、单字句占比（人类 0.09 vs 废稿 0.17，废稿里的重锤短句是作者手法）、
+  章末格言（宽正则在人写网文命中 0–2 行，收紧方案未验证）；英文 26 条 AI 写作指纹
+  大多为英文句法/排版特有（Title Case、弯引号、em dash、连字符对、被动缺主语），
+  中文无可迁移对应，逐条结论见 ds接手文档及工作记录/评估-2026-11-16-外部资料.md。
+
+### 测试
+- test_ai_cliche_check_script 加 tier4 断言：破折号/引号对/超短行三路各自触发
+  warn；平实文本结构级全 ok；CLI 结构级输出与退出码；**测试 195+9**
+- 环境注意：本机 NO_PROXY 含 [::1] 时 httpx 解析代理绕过规则会抛
+  InvalidURL: Invalid port，导致 web 端 32 个用例失败（与本版无关）；跑测试前
+  清空 NO_PROXY 即 195 passed。
+
 ## [0.13.15] - 2026-11-07
 
 ### Added（单元卡收口——连跑单元边界 + 验收口径单元化）

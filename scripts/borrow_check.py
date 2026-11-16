@@ -38,6 +38,47 @@ def _normalize_with_map(text: str) -> tuple[str, list[int]]:
     return "".join(kept), idx
 
 
+def find_borrows_words(draft: str, quotes: list[tuple[int, str, str]],
+                       min_words: int) -> list[dict]:
+    """英文路径：按词切窗（默认 5 词），返回命中词区间 [{start,end,len,nums}]。
+
+    英文按字符切 12 字窗≈2 个词，巧合命中概率高且漏掉真正搬运；改按词计，
+    与中文「≥12 字逐字重叠」同义（一个词的信息量≈2–3 个汉字）。
+    """
+    norm_quotes: list[tuple[int, list[str]]] = []
+    shingle_owner: dict[tuple[str, ...], set[int]] = {}
+    for num, _t, q in quotes:
+        nq = [w.lower() for w in splib.words_of(q)]
+        norm_quotes.append((num, nq))
+        for i in range(max(0, len(nq) - min_words + 1)):
+            shingle_owner.setdefault(tuple(nq[i:i + min_words]), set()).add(num)
+    nd = [w.lower() for w in splib.words_of(draft)]
+
+    def _in_any_quote(seq: list[str]) -> bool:
+        n = len(seq)
+        for _num, nq in norm_quotes:
+            for k in range(len(nq) - n + 1):
+                if nq[k:k + n] == seq:
+                    return True
+        return False
+
+    spans: list[list[int]] = []
+    i = 0
+    while i + min_words <= len(nd):
+        if tuple(nd[i:i + min_words]) in shingle_owner:
+            end = i + min_words
+            while end < len(nd) and _in_any_quote(nd[i:end + 1]):
+                end += 1
+            spans.append([i, end])
+            i = end
+        else:
+            i += 1
+    return [{"start": s, "end": e, "len": e - s,
+             "nums": sorted({n for k in range(s, e - min_words + 1)
+                             for n in shingle_owner.get(tuple(nd[k:k + min_words]), ())})}
+            for s, e in spans]
+
+
 def load_exemplar_quotes(pack: Path) -> list[tuple[int, str, str]]:
     """[(编号, 标题, 引文原文)]——exemplars.md 的 `> ` 引用块逐条取。"""
     path = pack / "exemplars.md"
@@ -96,7 +137,11 @@ def main() -> int:
     ap.add_argument("draft", help="草稿文件（.txt/.md）")
     ap.add_argument("--pack", required=True, help="风格包目录（读 exemplars.md）")
     ap.add_argument("--min-len", type=int, default=12,
-                    help="命中阈值：逐字重叠的最短字数（默认 12）")
+                    help="命中阈值：中文逐字重叠的最短字数（默认 12）")
+    ap.add_argument("--min-words", type=int, default=5,
+                    help="命中阈值：英文逐词重叠的最短词数（默认 5）")
+    ap.add_argument("--lang", default="auto", choices=["auto", "zh", "en"],
+                    help="草稿语言：auto=按 CJK 占比自动判定（默认）")
     args = ap.parse_args()
 
     draft_path = Path(args.draft)
@@ -113,6 +158,24 @@ def main() -> int:
         return 2
 
     draft = splib.read_text(draft_path)[0]
+    use_lang = splib.normalize_lang(args.lang, draft)
+    if use_lang == splib.LANG_EN:
+        words = splib.words_of(draft)
+        hits = find_borrows_words(draft, quotes, args.min_words)
+        print(f"borrow_check：草稿 {len(words)} 词 vs 范例 {len(quotes)} 条"
+              f"（阈值 ≥{args.min_words} 词逐词重叠）")
+        if not hits:
+            print("未发现整句搬运信号 ✅")
+            return 0
+        print(f"发现 {len(hits)} 处疑似借句：")
+        for h in hits:
+            orig = " ".join(words[h["start"]:h["end"]])
+            owners = "、".join(f"范例 {n}" for n in h["nums"])
+            shown = orig[:80] + ("…" if len(orig) > 80 else "")
+            print(f"  [{h['len']} 词 → {owners}] {shown}")
+        print("初筛信号仅供人工判读；化用/骨架雷同不在本工具射程内。")
+        return 1
+
     _nd, idx = _normalize_with_map(draft)
     hits = find_borrows(draft, quotes, args.min_len)
 

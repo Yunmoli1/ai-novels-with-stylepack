@@ -44,3 +44,6 @@ web/config.local.json.bak
 _s*.js
 _tmp*.js
 _tmp.js
+!scripts/ai_cliche_patterns.txt
+!scripts/ai_cliche_words_en.txt
+!scripts/ai_cliche_patterns_en.txt

@@ -148,12 +148,45 @@ def _clean_target_chars(n) -> int:
     return n if 300 <= n <= 20000 else 0
 
 
-def _prose_budget(cfg: dict, target_chars: int) -> int:
-    """正文生成 max_tokens：显式字数挡位按 1 字≈0.75 token 换算（与 assemble
-    同口径）加 600 余量；只增不减地覆盖 prose_max_tokens 配置兜底。"""
+def _pack_language(pack_dir: Path) -> str:
+    """风格包语言（pack.json.language，缺省 zh）——决定提示词语言与长度单位。
+
+    v0.13.17：语言是包的属性（决策 D1），脚本/门禁都从 --pack 读，故网页端
+    同样以包为准；en-US 归一为 en。"""
+    try:
+        meta = json.loads((pack_dir / "pack.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return splib.LANG_ZH
+    return splib.normalize_lang(meta.get("language") or splib.LANG_ZH)
+
+
+def _project_language(cfg: dict, project: str) -> str:
+    """项目语言 = 其默认风格包的语言（style/workbench.json default_pack）。
+
+    没有默认包（或包不存在）时按 zh——与历史行为一致，不猜。"""
+    pdir = _project_dir(cfg, project)
+    try:
+        wb = json.loads((pdir / "style" / "workbench.json")
+                        .read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return splib.LANG_ZH
+    name = (wb or {}).get("default_pack") or ""
+    if not name:
+        return splib.LANG_ZH
+    try:
+        return _pack_language(_pack_dir(name, pdir))
+    except HTTPException:
+        return splib.LANG_ZH
+
+
+def _prose_budget(cfg: dict, target_chars: int, lang: str = "zh") -> int:
+    """正文生成 max_tokens：中文按 1 字≈0.75 token 换算（与 assemble 同口径），
+    英文按 1 词≈1.35 token 换算；加 600 余量，只增不减地覆盖 prose_max_tokens。"""
     base = cfg.get("prose_max_tokens", 3500)
     if not target_chars:
         return base
+    if splib.normalize_lang(lang).startswith(splib.LANG_EN):
+        return max(base, int(target_chars * 1.35) + 600)
     return max(base, int(target_chars * assemble_mod.CHARS_PER_TOKEN) + 600)
 
 
@@ -331,7 +364,9 @@ def projects():
             meta = {}
         if meta.get("status") == "draft":  # v0.7.0：草稿包不进创作页下拉
             return None
-        return {"name": name, "version": _pack_version(d)}
+        return {"name": name, "version": _pack_version(d),
+                "language": splib.normalize_lang(meta.get("language")
+                                                 or splib.LANG_ZH)}
 
     packs = [e for e in (_pack_entry(d.name, d) for d in sorted(STYLEPACKS.iterdir())
                          if d.is_dir() and (d / "pack.json").is_file()
@@ -344,6 +379,7 @@ def projects():
     projects = appstate.discover_projects(_ws_root(cfg))
     for pr in projects:
         pr["longform"] = _is_longform(_ws_root(cfg) / pr["name"])
+        pr["language"] = _project_language(cfg, pr["name"])
     return {"workspace_root": str(_ws_root(cfg)),
             "projects": projects,
             "packs": packs}
@@ -626,13 +662,17 @@ def _session_warnings(sid: str) -> list[str]:
 
 
 def _do_model(cfg: dict, route: str, session_id: str, prompt: str,
-              max_tokens: int, json_mode: bool, kind: str = "other"):
+              max_tokens: int, json_mode: bool, kind: str = "other",
+              lang: str = "zh"):
+    """一次模型调用。lang 决定 system 提示语言（v0.13.17）：英文稿用英文 system，
+    避免中文 meta 指令把正文拽回中文腔。"""
     base, key, model = _resolve_model(cfg, route)
     extra = appstate.route_thinking(cfg, route)
     _guard(cfg, session_id, int(max_tokens * 1.5))
     try:
         result = model_client.chat(base, key, model,
-                                   [{"role": "system", "content": creation.SYSTEM},
+                                   [{"role": "system",
+                                     "content": creation.system_prompt(lang)},
                                     {"role": "user", "content": prompt}],
                                    temperature=cfg.get("temperature", 0.8),
                                    max_tokens=max_tokens, extra=extra)
@@ -658,16 +698,19 @@ def do_outline(body: OutlineIn):
     pdir = _project_dir(cfg, body.project)
     _ledger_gate(pdir, body.chapter_no, body.allow_unbilled)
     bs = _budget_gate(pdir, body.chapter_no, sid, body.allow_over_budget)
+    pack_dir = _pack_dir(body.pack, pdir)
+    lang = _pack_language(pack_dir)
     assembly = assemble_mod.assemble(
-        pdir, _pack_dir(body.pack, pdir),
+        pdir, pack_dir,
         body.chapter_no, body.keywords, cfg.get("context_budget_tokens", 24000))
     prompt = creation.outline_prompt(body.chapter_no, body.title, body.keywords,
-                                     assembly["kept_texts"], body.user_notes)
+                                     assembly["kept_texts"], body.user_notes,
+                                     lang=lang)
     g0t = _g0_text(body.g0)
     if g0t:
         prompt += chr(10) * 2 + g0t
     result = _do_model(cfg, _write_route(cfg, pdir, body), sid, prompt, 2200,
-                       True, kind="gen")
+                       True, kind="gen", lang=lang)
     return {"session_id": sid, "options": result["json"].get("options", []),
             "recommended": result["json"].get("recommended", 0),
             "usage": result, "budget": _budget_state(pdir, body.chapter_no, sid),
@@ -686,19 +729,24 @@ def do_beats(body: BeatsIn):
     pdir = _project_dir(cfg, body.project)
     _ledger_gate(pdir, body.chapter_no, body.allow_unbilled)
     bs = _budget_gate(pdir, body.chapter_no, sid, body.allow_over_budget)
+    pack_dir = _pack_dir(body.pack, pdir)
+    lang = _pack_language(pack_dir)
     assembly = assemble_mod.assemble(
-        pdir, _pack_dir(body.pack, pdir),
+        pdir, pack_dir,
         body.chapter_no, body.keywords, cfg.get("context_budget_tokens", 24000))
     canon_note = ("二创项目：原作锚点必须落到 canon-terms.json 的 must 术语与人物"
                   if (pdir / "canon" / "canon-terms.json").is_file() else "")
+    if splib.normalize_lang(lang).startswith(splib.LANG_EN) and canon_note:
+        canon_note = ("Derivative project: the canon anchor must name must-terms and "
+                      "characters from canon-terms.json")
     prompt = creation.beats_prompt(body.chapter_no, body.title, body.chosen,
                                    assembly["kept_texts"], canon_note,
-                                   _clean_target_chars(body.target_chars))
+                                   _clean_target_chars(body.target_chars), lang=lang)
     g0t = _g0_text(body.g0)
     if g0t:
         prompt += chr(10) * 2 + g0t
     result = _do_model(cfg, _write_route(cfg, pdir, body), sid, prompt, 2400,
-                       True, kind="gen")
+                       True, kind="gen", lang=lang)
     return {"session_id": sid, **result["json"], "usage": result,
             "budget": _budget_state(pdir, body.chapter_no, sid)}
 
@@ -714,18 +762,21 @@ def do_reroll(body: RerollIn):
     sid = _session_id(body)
     pdir = _project_dir(cfg, body.project)
     bs = _budget_gate(pdir, body.chapter_no, sid, body.allow_over_budget)
+    pack_dir = _pack_dir(body.pack, pdir)
+    lang = _pack_language(pack_dir)
     assembly = assemble_mod.assemble(
-        pdir, _pack_dir(body.pack, pdir),
+        pdir, pack_dir,
         body.chapter_no, body.keywords, cfg.get("context_budget_tokens", 24000))
     prompt = creation.reroll_beat_prompt(body.chapter_no, body.title, body.chosen,
                                          body.beats, body.index,
                                          assembly["kept_texts"],
-                                         _clean_target_chars(body.target_chars))
+                                         _clean_target_chars(body.target_chars),
+                                         lang=lang)
     g0t = _g0_text(body.g0)
     if g0t:
         prompt += chr(10) * 2 + g0t
     result = _do_model(cfg, _write_route(cfg, pdir, body), sid, prompt, 600,
-                       True, kind="gen")
+                       True, kind="gen", lang=lang)
     return {"session_id": sid, "beat": result["json"], "usage": result,
             "budget": _budget_state(pdir, body.chapter_no, sid)}
 
@@ -752,10 +803,12 @@ def _prep_generate(cfg: dict, body: GenerateIn) -> dict:
         project_dir, pack_dir, body.chapter_no, body.keywords,
         cfg.get("context_budget_tokens", 24000), ref_pack_dirs=ref_dirs)
     target = _clean_target_chars(body.target_chars)
+    lang = _pack_language(pack_dir)
     prompt = creation.prose_prompt(body.chapter_no, body.title, body.chosen,
                                    body.beats, body.tone_note, body.canon_anchor,
                                    assembly["kept_texts"],
-                                   target or cfg.get("prose_max_tokens", 3500) * 2 // 3)
+                                   target or cfg.get("prose_max_tokens", 3500) * 2 // 3,
+                                   lang=lang)
     g0t = _g0_text(getattr(body, "g0", None))
     if g0t:
         prompt = prompt + chr(10) * 2 + g0t
@@ -763,10 +816,10 @@ def _prep_generate(cfg: dict, body: GenerateIn) -> dict:
     if sc:
         prompt = prompt + chr(10) * 2 + sc
     return {"pack_dir": pack_dir, "project_dir": project_dir,
-            "ref_dirs": ref_dirs,
+            "ref_dirs": ref_dirs, "lang": lang,
             "assembly": assembly, "prompt": prompt, "route":
                 _write_route(cfg, project_dir, body), "bstate": bstate,
-            "budget": _prose_budget(cfg, target), "target": target}
+            "budget": _prose_budget(cfg, target, lang), "target": target}
 
 
 @router.post("/generate")
@@ -783,7 +836,8 @@ def do_generate(body: GenerateIn):
     drafts = []
     with tempfile.TemporaryDirectory() as td:
         for i in range(max(1, min(3, body.n_drafts))):
-            result = _do_model(cfg, route, sid, prompt, budget, False, kind="gen")
+            result = _do_model(cfg, route, sid, prompt, budget, False, kind="gen",
+                               lang=prep["lang"])
             draft_path = Path(td) / f"d{i}.txt"
             draft_path.write_text(result["text"], encoding="utf-8", newline="\n")
             fp = _run_gate("fp_check.py", [str(pack_dir), str(draft_path)])
@@ -826,7 +880,7 @@ def _stream_one_draft(cfg: dict, sid: str, prompt: str, budget: int,
                       pack_dir: Path, index: int, done_event: str = "draft_done",
                       extra: dict | None = None,
                       numbers_ctx: dict | None = None, route: str = "write",
-                      ref_dirs: list[Path] | None = None):
+                      ref_dirs: list[Path] | None = None, lang: str = "zh"):
     """产出一个稿的事件序列：流式优先；空稿/流式不可用回退非流加倍链（v0.6.2）。
     结尾必发 done_event（成功）或 error（失败）——前端按此收口。
     numbers_ctx（v0.11.1 B-3）：{"ledger": 路径, "chapter": 章号}——长篇项目
@@ -834,7 +888,7 @@ def _stream_one_draft(cfg: dict, sid: str, prompt: str, budget: int,
     route（v0.11.2 C-4）：量产章走 write_mass（路由解析在 _prep_generate）。"""
     base, key, model = _resolve_model(cfg, route)
     think = appstate.route_thinking(cfg, route)
-    messages = [{"role": "system", "content": creation.SYSTEM},
+    messages = [{"role": "system", "content": creation.system_prompt(lang)},
                 {"role": "user", "content": prompt}]
     _guard(cfg, sid, int(budget * 1.5))
     parts: list[str] = []
@@ -865,7 +919,7 @@ def _stream_one_draft(cfg: dict, sid: str, prompt: str, budget: int,
         yield _sse("status", message=f"{why}——加倍预算回退重试……")
         try:
             result = _do_model(cfg, route, sid, prompt, budget * 2, False,
-                               kind="gen")
+                               kind="gen", lang=lang)
         except HTTPException as exc:
             if text.strip():  # 保留截断部分，前端按徽标警告
                 yield _sse("status", message=f"回退失败：{_short(exc)}；"
@@ -941,7 +995,8 @@ def do_generate_stream(body: GenerateIn):
             yield from _stream_one_draft(cfg, sid, prep["prompt"], prep["budget"],
                                          prep["pack_dir"], i, numbers_ctx=nctx,
                                          route=prep["route"],
-                                         ref_dirs=prep.get("ref_dirs"))
+                                         ref_dirs=prep.get("ref_dirs"),
+                                         lang=prep["lang"])
         yield _sse("all_done", assembly_tokens=prep["assembly"]["total_est_tokens"],
                    budget=_budget_state(prep["project_dir"], body.chapter_no, sid),
                    warnings=_session_warnings(sid))
@@ -990,15 +1045,21 @@ def _prep_revise(cfg: dict, body: ReviseIn) -> dict:
     assembly = assemble_mod.assemble(
         project_dir, pack_dir, body.chapter_no, body.keywords,
         cfg.get("context_budget_tokens", 24000), ref_pack_dirs=ref_dirs)
-    target = _clean_target_chars(body.target_chars) or len(body.text or "")
+    lang = _pack_language(pack_dir)
+    if splib.normalize_lang(lang).startswith(splib.LANG_EN):
+        default_target = len(creation._words_of(body.text or ""))
+    else:
+        default_target = len(body.text or "")
+    target = _clean_target_chars(body.target_chars) or default_target
     prompt = creation.revise_prompt(body.chapter_no, body.title, body.beats,
                                     assembly["kept_texts"], body.text,
-                                    _gate_reports_text(body.reports), target)
+                                    _gate_reports_text(body.reports), target,
+                                    lang=lang)
     return {"pack_dir": pack_dir, "ref_dirs": ref_dirs, "prompt": prompt,
-            "bstate": bstate,
+            "bstate": bstate, "lang": lang,
             # ×2：修订要整篇重写（输出≈原文），思考型模型的推理也吃同一预算——
             # 2500 字章在 ×1 下实测推理+正文 >14000 tokens 被截成 1099 字
-            "budget": _prose_budget(cfg, target) * 2}
+            "budget": _prose_budget(cfg, target, lang) * 2}
 
 
 @router.post("/revise")
@@ -1008,7 +1069,7 @@ def do_revise(body: ReviseIn):
     project_dir = _project_dir(cfg, body.project)
     prep = _prep_revise(cfg, body)
     result = _do_model(cfg, "write", sid, prep["prompt"], prep["budget"], False,
-                       kind="rev")
+                       kind="rev", lang=prep["lang"])
     with tempfile.TemporaryDirectory() as td:
         draft_path = Path(td) / "revised.txt"
         draft_path.write_text(result["text"], encoding="utf-8", newline="\n")
@@ -1038,7 +1099,8 @@ def do_revise_stream(body: ReviseIn):
         yield from _stream_one_draft(cfg, sid, prep["prompt"], prep["budget"],
                                      prep["pack_dir"], 0, done_event="revised_done",
                                      extra={"revision": int(body.revision) + 1},
-                                     ref_dirs=prep.get("ref_dirs"))
+                                     ref_dirs=prep.get("ref_dirs"),
+                                     lang=prep["lang"])
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache",
@@ -1063,12 +1125,17 @@ def do_rewrite(body: RewriteIn):
     cfg = appstate.load_config()
     sid = _session_id(body)
     prep = _prep_generate(cfg, body)
+    lang = prep["lang"]
     prompt = creation.rewrite_prompt(body.chapter_no, body.title, body.beats,
                                      prep["assembly"]["kept_texts"], body.text,
-                                     body.fragment, body.instruction)
+                                     body.fragment, body.instruction, lang=lang)
+    rewrite_target = (len(creation._words_of(body.text))
+                      if splib.normalize_lang(lang).startswith(splib.LANG_EN)
+                      else len(body.text)) or 2500
     result = _do_model(cfg, "write", sid, prompt,
                        max(prep["budget"], _prose_budget(
-                           cfg, len(body.text) or 2500) * 2), False, kind="gen")
+                           cfg, rewrite_target, lang) * 2), False,
+                       kind="gen", lang=lang)
     text = result["text"]
     # 改写守护：其余部分应基本保留（差异段落数 >1/3 视为跑偏，退回原稿提示）
     import difflib
@@ -1135,8 +1202,9 @@ def do_ending(body: EndingIn):
     cfg = appstate.load_config()
     sid = _session_id(body)
     tail = body.text[-800:]
-    prompt = creation.ending_check_prompt(body.title, tail)
-    result = _do_model(cfg, "judge", sid, prompt, 500, True)
+    lang = splib.detect_lang(body.text)  # 收尾检查提示语言跟随正文语言
+    prompt = creation.ending_check_prompt(body.title, tail, lang=lang)
+    result = _do_model(cfg, "judge", sid, prompt, 500, True, lang=lang)
     return {"session_id": sid, "ending_check": result["json"], "usage": result}
 
 

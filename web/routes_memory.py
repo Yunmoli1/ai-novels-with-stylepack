@@ -51,10 +51,11 @@ def memory_delta(body: DeltaIn):
     cfg = appstate.load_config()
     store = _store(cfg, body.project)
     store.sync()  # bible → 索引保鲜（零成本，本地 SQLite）
+    lang = _rc._project_language(cfg, body.project)  # 项目默认包语言（v0.13.17）
     prompt = creation.memory_digest_prompt(body.chapter_no, body.title,
-                                           body.beats, body.text)
+                                           body.beats, body.text, lang=lang)
     sid = body.session_id or f"mem-{body.chapter_no:03d}"
-    result = _rc._do_model(cfg, "judge", sid, prompt, 1400, True)
+    result = _rc._do_model(cfg, "judge", sid, prompt, 1400, True, lang=lang)
     data = result["json"]
     payload = {"chapter": f"{body.chapter_no:03d}",
                "digest": str(data.get("digest") or "")[:200]}

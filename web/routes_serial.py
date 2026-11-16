@@ -232,7 +232,9 @@ def _project_local_packs(d: Path) -> list[dict]:
             continue  # 草稿不进下拉（与全局包同规）
         out.append({"name": f"project:{pdir.name}",
                     "version": str(meta.get("version") or "?"),
-                    "display_name": str(meta.get("display_name") or pdir.name)})
+                    "display_name": str(meta.get("display_name") or pdir.name),
+                    "language": splib.normalize_lang(meta.get("language")
+                                                     or splib.LANG_ZH)})
     return out
 
 

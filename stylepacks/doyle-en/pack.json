@@ -1,0 +1,45 @@
+{
+  "format_version": "0.2",
+  "name": "doyle-en",
+  "display_name": "Arthur Conan Doyle（英文示范包）",
+  "language": "en",
+  "genres": [
+    "narrative",
+    "mystery",
+    "short-story"
+  ],
+  "registers": false,
+  "version": "0.1.1",
+  "created": "2026-11-16",
+  "updated": "2026-11-16",
+  "corpus": {
+    "works": [
+      "The Adventures of Sherlock Holmes (1892)"
+    ],
+    "total_chars": 561743,
+    "sampling": "11 samples of ~9,000 words each (whole-book clean text, no cherry-picking)",
+    "confidence": "中：单一作者单一集子（10.5 万词），narrative 层 n=11；未覆盖历史小说与恐怖长篇，写法跨度请勿外推"
+  },
+  "provenance": [
+    {
+      "type": "web",
+      "url": "https://www.gutenberg.org/cache/epub/1661/pg1661.txt",
+      "fetched_at": "2026-11-16",
+      "notes": "Project Gutenberg #1661（The Adventures of Sherlock Holmes）。已去 PG 页眉页脚、段内硬换行合并、章节标题行剥离。本地自测语料，不入发行包。"
+    }
+  ],
+  "license_note": "公版（Doyle 1930 年逝世；本集各篇 1891–1892 年首发）。exemplars 为公版原文短引（每条 ≤200 字符）加批注；本包不含任何全文。",
+  "changelog": [
+    {
+      "version": "0.1.0",
+      "date": "2026-11-16",
+      "changes": "初版：英文链路示范包（v0.13.17）。11×9k 词样本建词级分层指纹（narrative 层 n=11，留一 Delta 及格线）；profile/lexicon/limits/thought 手写蒸馏；用于验证「英文作品从建包到验收」整条链路。"
+    },
+    {
+      "version": "0.1.1",
+      "date": "2026-11-16",
+      "changes": "分层指纹重建"
+    }
+  ],
+  "thought": true
+}

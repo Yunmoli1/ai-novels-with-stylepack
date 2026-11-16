@@ -62,8 +62,50 @@ function setStage(i) {
   $('stagebar').innerHTML = STAGES.map((name, k) =>
     `<span class="stage ${k < S.stage ? 'done' : ''} ${k === S.stage ? 'cur' : ''}">${name}</span>`).join('');
 }
+function uni() { return S.lang === 'en' ? 'words' : '字'; }  // 长度单位（v0.13.17）
 function updateMeta() {
-  $('genmeta').textContent = `模型：${S.modelLabel}｜目标正文 ≈ ${targetChars() || '未设'} 字`;
+  $('genmeta').textContent = `模型：${S.modelLabel}｜目标正文 ≈ ${targetChars() || '未设'} ${uni()}`;
+}
+// 语言自适应（v0.13.17）：包的 language 决定长度单位与提示词语言（服务端按包判定），
+// 界面只跟随显示——中文界面写英文稿是合法组合。
+function packLang(name) {
+  const hit = (S.packList || []).find(p => p.name === name);
+  if (hit && hit.language) return hit.language;
+  const pj = (S.projectPacks || []).find(p => p.name === name);
+  if (pj && pj.language) return pj.language;
+  const cur = (S.projects || []).find(p => p.name === ($('project') || {}).value);
+  return (cur && cur.language) || 'zh';
+}
+function applyLang() {
+  const lang = packLang($('pack') ? $('pack').value : '');
+  S.lang = lang;
+  const en = lang === 'en';
+  const u = en ? 'words' : '字';
+  if ($('lang_badge')) {
+    $('lang_badge').textContent = en ? '🌐 English pack（长度按 words 计）'
+                                     : '🌐 中文包（长度按字计）';
+  }
+  if ($('lbl_tier')) $('lbl_tier').textContent = en ? 'Length tier' : '字数挡位';
+  if ($('char_tier')) {
+    [...$('char_tier').options].forEach(o => {
+      if (o.value === 'custom') { o.textContent = en ? 'custom…' : '自定义…'; return; }
+      const n = o.value;
+      o.textContent = en ? `short ≈${n} words` : `短章 ≈${n} 字`;
+      if (n === '1500') o.textContent = en ? `short ≈${n} words` : `短章 ≈${n} 字`;
+      if (n === '2500') o.textContent = en ? `standard ≈${n} words` : `标准 ≈${n} 字`;
+      if (n === '4000') o.textContent = en ? `long ≈${n} words` : `长章 ≈${n} 字`;
+      if (n === '6000') o.textContent = en ? `extra long ≈${n} words` : `特长 ≈${n} 字`;
+    });
+  }
+  if ($('target_chars')) {
+    $('target_chars').title = en ? 'custom target length (300–20000 words)'
+                                 : '自定义目标字数（300–20000）';
+  }
+  if ($('keywords')) {
+    $('keywords').placeholder = en ? 'comma separated (who / what appears)'
+                                   : '人物/物件/本章涉及';
+  }
+  updateMeta();
 }
 function keywords() { return $('keywords').value.split(/[、,，]/).map(s => s.trim()).filter(Boolean); }
 function tierChange() {
@@ -97,6 +139,7 @@ async function init() {
     S.modelLabel = (w.provider || '?') + '/' + (w.model || '未配置');
   } catch (e) {}
   updateMeta();
+  applyLang();
   loadPresets();
   loadSlots();
   renderOnboard(d);
@@ -216,6 +259,7 @@ async function switchProject() {
   await loadProjectPacks();  // v0.13.12：重建包下拉（本项目分组）+取默认链
   formRestore();  // 表单跨页记忆：覆盖默认建议（该项目的上次工作态）
   applyDefaultPack();  // 默认解析链覆盖包字段（显式默认>form 记忆）
+  applyLang();  // v0.13.17：默认包可能覆盖了 form 记忆的包，语言判定跟着重算
   // v0.13.13 参考池：上次勾选 > 项目池（workbench.json）
   let allForm = {};
   try { allForm = JSON.parse(loadState('form') || '{}'); } catch (e) {}
@@ -354,6 +398,7 @@ async function loadPresets() {
     $('tone_list').innerHTML = (p.tones || []).map(t => `<option value="${esc(t)}">`).join('');
     $('anchor_list').innerHTML = (p.anchors || []).map(t => `<option value="${esc(t)}">`).join('');
   } catch (e) {}
+  applyLang();  // v0.13.17：换包即换长度单位/提示语言（loadProjectPacks 先于本函数时可拿到 language）
 }
 // ---- 步骤流 ----
 async function doAssemble() {
@@ -785,7 +830,11 @@ async function batchChapter(row) {
     if (g.budget && g.budget.state === 'halt') { blog('  ⛔ 预算止损线——终止'); return false; }
     const dr = (g.drafts || [])[0];
     if (!dr || !(dr.text || '').trim()) { blog('  ⛔ 空稿——红停'); return false; }
-    const len = dr.text.length, tgt = targetChars() || 2500;
+    const en = packLang($('pack').value) === 'en';
+    const len = en ? (dr.text.match(/[A-Za-z]+(?:['’][A-Za-z]+)?/g) || []).length
+                   : dr.text.length;  // v0.13.17：英文按词、中文按字（同一段阈值语义）
+    const u = en ? 'words' : '字';
+    const tgt = targetChars() || 2500;
     let yellow = false;
     const fpX = (dr.fp_check || {}).exit_code, bwX = (dr.borrow_check || {}).exit_code;
     if ((fpX !== undefined && fpX !== 0) || (bwX !== undefined && bwX !== 0)) {
@@ -804,12 +853,13 @@ async function batchChapter(row) {
       }
       yellow = true; blog('  🟡 卡面禁语同现——黄级，供人扫');
     }
-    if (len < 2200 || len > tgt * 1.5) {
-      blog(`  ⛔ 字数越界：${len} 字（界 2200–${Math.round(tgt * 1.5)}）——红停`); return false; }
+    const floor = en ? Math.round(tgt * 0.8) : 2200;  // 中文沿用 2200 字硬底
+    if (len < floor || len > tgt * 1.5) {
+      blog(`  ⛔ 篇幅越界：${len} ${u}（界 ${floor}–${Math.round(tgt * 1.5)}）——红停`); return false; }
     if (nc && nc.exit_code === 1) { yellow = true; blog('  🟡 数字对照有发现项（场景级）'); }
     if ((dr.ai_cliche || {}).exit_code === 1) { yellow = true; blog('  🟡 AI 腔密度偏高'); }
-    if (Math.abs(len - tgt) / tgt > 0.15) { yellow = true; blog(`  🟡 字数偏差 >15%：${len}/${tgt}`); }
-    blog(`  ④ 交付（${len} 字）……`);
+    if (Math.abs(len - tgt) / tgt > 0.15) { yellow = true; blog(`  🟡 篇幅偏差 >15%：${len}/${tgt} ${u}`); }
+    blog(`  ④ 交付（${len} ${u}）……`);
     const sv = await post('/app/api/save', { ...base, text: dr.text, chosen,
       beats, tone_note: b.tone_note || '不指定', canon_anchor: b.canon_anchor || '无',
       checks: { fp_check: dr.fp_check, borrow_check: dr.borrow_check },
@@ -842,7 +892,7 @@ async function batchChapter(row) {
     S.batchRun.warnStreak = yellow ? S.batchRun.warnStreak + 1 : 0;
     if (S.batchRun.warnStreak >= 3) {
       blog('  ⛔ 黄灯连击 ×3——漂移趋势，停（批后建议跑指纹趋势）'); return false; }
-    blog(`  ✓ 第${n}章 交付完成（${len} 字）`);
+    blog(`  ✓ 第${n}章 交付完成（${len} ${u}）`);
     return true;
   } catch (e) {
     blog('  ⛔ 异常：' + e.message + '——红停（断点=最后交付章）');

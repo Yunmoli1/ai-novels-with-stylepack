@@ -25,6 +25,19 @@ sys.path.insert(0, str(Path(__file__).parent))
 import splib  # noqa: E402
 
 
+def _pack_language(pack_dir: Path, fingerprint: dict) -> str:
+    """包语言：fingerprint.language 优先，其次 pack.json.language，缺省 zh。
+
+    只取主语言子标签（zh-Hans → zh），与 splib.normalize_lang 的口径一致。
+    """
+    lang = fingerprint.get("language")
+    if not lang:
+        pj = pack_dir / "pack.json"
+        if pj.is_file():
+            lang = splib.load_json(pj).get("language")
+    return splib.normalize_lang(lang or splib.LANG_ZH)
+
+
 def _meta_lines(res: dict) -> list[str]:
     det = res["genre"]
     lines = [f"文体判定：{det['genre']}（段首引号段 {det['dialogue_para_ratio']:.0%}，"
@@ -48,6 +61,14 @@ def render_report(pack_name: str,
     lines = [f"# 风格验收报告：{pack_name}", ""]
     overall_ok = True
     for label, rows, diffs, meta in results:
+        if meta.get("language_mismatch"):
+            overall_ok = False
+            lines.append(f"## {label} —— ⛔ 语言不匹配")
+            lines.append("")
+            for ln in meta.get("notes", []):
+                lines.append(f"> {ln}")
+            lines.append("")
+            continue
         ok = splib.all_ok(rows)
         overall_ok = overall_ok and ok
         lines.append(f"## {label} —— {'✅ 通过' if ok else '❌ 不达标'}")
@@ -75,7 +96,9 @@ def render_report(pack_name: str,
                 lines.append(
                     f"| `{d['path']}` | {d['baseline']} | {d['actual']} | {d['delta']} | {mark} |")
         lines.append("")
-    verdict = "全部通过" if overall_ok else "存在不达标项，建议按偏差最大的指标修订文本或档案"
+    verdict = ("全部通过" if overall_ok else
+               "存在不达标项，建议按偏差最大的指标修订文本或档案"
+               "（语言不匹配时请先用同语言指纹，或用 fp_extract --lang 另建指纹）")
     lines.append(f"> 结论：**{verdict}**")
     return "\n".join(lines) + "\n"
 
@@ -108,6 +131,7 @@ def main() -> int:
         print(f"错误：找不到 {fp_path}", file=sys.stderr)
         return 2
     fingerprint = splib.load_json(fp_path)
+    pack_lang = _pack_language(pack_dir, fingerprint)
     files = splib.collect_text_files(args.inputs)
     if not files:
         print("错误：未找到任何待验收文本", file=sys.stderr)
@@ -126,14 +150,16 @@ def main() -> int:
         for f in files:
             text, _ = splib.read_text(f)
             res = splib.layered_check(text, fingerprint, genre=args.genre,
-                                      delta_max_override=args.delta_max)
+                                      delta_max_override=args.delta_max,
+                                      lang=pack_lang)
             results.append((f.name, res["rows"], None, res))
             label_texts.append((f.name, text))
     else:
         parts = [splib.read_text(f)[0] for f in files]
         text = "\n\n".join(parts)
         res = splib.layered_check(text, fingerprint, genre=args.genre,
-                                  delta_max_override=args.delta_max)
+                                  delta_max_override=args.delta_max,
+                                  lang=pack_lang)
         rows = res["rows"]
         diffs = None
         if args.baseline_path:
@@ -150,6 +176,12 @@ def main() -> int:
         label_texts.append((f"合并 {len(files)} 个文件", text))
 
     for label, rows, _, res in results:
+        if res.get("language_mismatch"):
+            print(f"{label}: ⛔ [语言不匹配] 包语言 {res['pack_language']}，"
+                  f"文本语言 {res['text_language']}——未做验收判定")
+            for n in res["notes"]:
+                print(f"    {n}")
+            continue
         ok = splib.all_ok(rows)
         bad = [r for r in rows if not r["ok"]]
         status = "✅ 通过" if ok else f"❌ 不达标（{len(bad)}/{len(rows)} 项）"
@@ -173,9 +205,11 @@ def main() -> int:
             if not motifs:
                 print("提示（--thought）：thought.md 缺少「motif 词表：」行")
             else:
-                print("motif 密度对照（advisory——意象可堆砌，仅供判读参考，不进判定；单位 次/千字）：")
+                unit = "次/千词" if pack_lang == "en" else "次/千字"
+                print(f"motif 密度对照（advisory——意象可堆砌，仅供判读参考，"
+                      f"不进判定；单位 {unit}）：")
                 for label, txt in label_texts:
-                    rates = splib.count_motifs(txt, motifs)
+                    rates = splib.count_motifs(txt, motifs, lang=pack_lang)
                     cells = "；".join(
                         f"{w} 语料 {corpus_rates.get(w, 0.0):.2f} vs 本文 {rates[w]:.2f}"
                         for w in motifs)

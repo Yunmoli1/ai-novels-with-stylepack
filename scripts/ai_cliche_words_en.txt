@@ -1,0 +1,106 @@
+# AI 腔词表·英文（ai_cliche_check.py --lang en 的数据文件；可编辑、进 git）
+# 三档分节；每行一个词或短语，英文按词边界、大小写不敏感匹配（中文词表是子串匹配）。
+# 判定：命中数 / 千词；阈值见脚本 VOCAB_BY_LANG["en"]。
+#
+# 收录标准（2026-11-16 标定，本机离线语料）：
+#   人类侧 = downloads/corpus_en 下 10 部古登堡公版书（约 119 万词：Doyle/Austen/Dickens/
+#            Twain/Stoker/Melville/Carroll/Wilde）；
+#   AI 侧 = downloads/corpus_en/_ai_baseline 的 11 章本章语（约 1.8 万词，本项目自家 API 生成）。
+#   只收「人类侧命中率 ≤0.005/千词」（≈ 每 20 万词至多一次）的条目，实测命中率逐条列在
+#   下方注释里；凡人类古典散文本来就常用的词（cry/fancy/upon/little did/palpable/a sea of/
+#   the weight of/not just…）一律不收——英文的「古典腔」和「AI 腔」不能混为一谈。
+# 说明：人类基线是 19 世纪散文，所以本表对「现代英语 + 现代生活词」同样敏感；这是刻意的，
+#   风格包要模仿的是某个年代，时代错位词进正文就是错。泛中文项目不受影响（走中文表）。
+#
+# 包级豁免：stylepacks/<pack>/limits.md 的 `## AI 腔豁免` 节，逐行词（大小写不敏感）。
+
+## tier1 口头禅（现代填充/口语）
+# 人类侧命中：全部 0 次
+okay
+yeah
+yep
+nope
+dude
+guys
+alright
+kinda
+gonna
+wanna
+gotta
+mom
+gotten
+
+## tier2 现代名词（时代错位，写 19 世纪故事就是硬伤）
+# 人类侧命中：phone 0、computer 0、email 0、internet 0、television 0、telly 0、
+#   weekend 0、commute 0、deadline 0、therapy 0、trauma 0、stressful 0、normalcy 0、
+#   vibes 0、boundaries 0、boss 0、awesome 0、creepy 0、boyfriend 0、girlfriend 0、
+#   teenage 0；closure 1 次（0.001/千词）。AI 基线里 phone 出现 9 次、alright 2 次、
+#   boundaries 2 次、computer 1 次——这正是这套表要抓的东西。
+phone
+computer
+email
+internet
+television
+telly
+weekend
+commute
+deadline
+therapy
+trauma
+stressful
+normalcy
+vibes
+boundaries
+closure
+boss
+awesome
+creepy
+boyfriend
+girlfriend
+teenage
+
+## tier3 意象套话 / 情感套式（AI 习语）
+# 人类侧命中（次）：a testament to 0、a stark reminder 0、a stark contrast 0、
+#   serves as a reminder 0、delve into 0、delve 0、underscores 0、underscore 0、
+#   it's worth noting 0、in a world where 0、navigate the 0、something shifted 0、
+#   a mix of 0、a beat of 0、as if on cue 0、couldn't help but 0、breath caught 0、
+#   breath hitched 0、heart pounded 0、heart raced 0、eyes widened 0、swallowed hard 0、
+#   let out a 0、held her breath 0、jaw tightened 0、exhaled slowly 0、drew a breath 0、
+#   quirked 0、thick with tension 0；a flicker of 1、the air was thick 1、held his breath 2。
+# AI 基线里命中：not just 8、a flicker of 5、the weight of 3、let out a 2、
+#   a testament to 1、navigate the 1、something shifted 1、breath caught 1、met her gaze 1。
+a testament to
+a stark reminder
+a stark contrast
+serves as a reminder
+delve into
+delve
+underscores
+underscore
+it's worth noting
+in a world where
+navigate the
+something shifted
+a flicker of
+a mix of
+a beat of
+as if on cue
+couldn't help but
+breath caught
+breath hitched
+heart pounded
+heart raced
+eyes widened
+swallowed hard
+let out a
+held her breath
+held his breath
+jaw tightened
+exhaled slowly
+drew a breath
+drew a shaky breath
+met her gaze
+met his gaze
+the air was thick
+thick with tension
+quirked
