@@ -69,6 +69,7 @@ function updateMeta() {
 // 语言自适应（v0.13.17）：包的 language 决定长度单位与提示词语言（服务端按包判定），
 // 界面只跟随显示——中文界面写英文稿是合法组合。
 function packLang(name) {
+  if (S.langMode) return S.langMode;  // v0.13.19 显式模式锁优先于被动跟包
   const hit = (S.packList || []).find(p => p.name === name);
   if (hit && hit.language) return hit.language;
   const pj = (S.projectPacks || []).find(p => p.name === name);
@@ -1497,10 +1498,12 @@ async function loadProjectPacks() {
   S.defaultPack = pp.default_pack || null;
   S.defaultHint = pp.hint || '';
   S.refPoolDefault = pp.ref_packs || [];  // v0.13.13 项目参考池默认（workbench.json）
+  S.langMode = pp.lang_mode || "";        // v0.13.19 显式语言模式（空=跟随包）
+  const inMode = p => !S.langMode || (p.language || 'zh') === S.langMode;
   const cur = $('pack').value;
-  const g = (S.packList || []).map(p =>
+  const g = (S.packList || []).filter(inMode).map(p =>
     `<option value="${esc(p.name)}">${esc(p.name)}${p.version ? ' v' + esc(p.version) : ''}</option>`).join('');
-  const pjOpts = S.projectPacks.map(p =>
+  const pjOpts = S.projectPacks.filter(inMode).map(p =>
     `<option value="${esc(p.name)}">${esc(p.display_name || p.name)} v${esc(p.version || '?')}（本项目）</option>`).join('');
   $('pack').innerHTML = (pjOpts ? `<optgroup label="本项目">${pjOpts}</optgroup>` : '')
     + (g ? `<optgroup label="全局 / local">${g}</optgroup>` : '');
@@ -1571,6 +1574,34 @@ function renderRefPool() {
       `<input type="checkbox" ${on ? 'checked' : ''} onchange="refPoolToggle('${esc(p.name)}', this.checked)">` +
       `${esc(p.display_name || p.name)}</label>`;
   }).join('');
+}
+async function setLangMode(mode) {
+  const proj = $('project') && $('project').value;
+  if (!proj) return;
+  try { await post('/app/api/serial/lang_mode', { project: proj, lang_mode: mode }); }
+  catch (e) { return toast(e.message, 'bad'); }
+  S.langMode = mode;
+  await loadProjectPacks();
+  applyLang();
+  // 当前包与新模式不符 → 自动切到该模式下的包（默认链/首个）
+  const lang = packLang($('pack').value);
+  if (mode && lang !== mode) {
+    const known = [...(S.packList || []), ...(S.projectPacks || [])];
+    const okOpt = [...$('pack').options].find(o => {
+      const hit = known.find(p => p.name === o.value);
+      return hit && (hit.language || 'zh') === mode;
+    });
+    if (okOpt) {
+      $('pack').value = okOpt.value;
+      $('pack').dispatchEvent(new Event('change'));
+      toast(`已切换${mode === 'en' ? ' English' : '中文'}模式——包已切至 ${okOpt.value}`, 'good');
+      return;
+    }
+    toast(`已切换${mode === 'en' ? ' English' : '中文'}模式（该模式下暂无可用包）`, 'bad');
+    return;
+  }
+  toast(mode ? `语言模式锁定：${mode === 'en' ? 'English' : '中文'}`
+             : '语言模式：跟随包（按所选包判定）', 'good');
 }
 async function saveRefPool() {
   const proj = $('project') && $('project').value;

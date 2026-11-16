@@ -295,7 +295,37 @@ def project_packs_view(project: str):
         except (OSError, ValueError):
             wj = {}
     return {"packs": packs, "default_pack": default, "hint": hint,
-            "ref_packs": wj.get("ref_packs") or []}
+            "ref_packs": wj.get("ref_packs") or [],
+            "lang_mode": wj.get("lang_mode") or ""}
+
+
+class LangModeIn(BaseModel):
+    project: str
+    lang_mode: str = ""   # 空 = 跟随包（默认）；zh / en = 显式锁定
+
+
+@router.post("/lang_mode")
+def set_lang_mode(body: LangModeIn):
+    """项目语言模式（v0.13.19）：显式锁定 zh/en（空=跟随包）。
+    锁定后包下拉按语言过滤、UI 数值语义随之切换——模式是用户决定，
+    不再被动跟包；语言护栏仍在服务端兜底。"""
+    if body.lang_mode not in ("", "zh", "en"):
+        raise HTTPException(400, "lang_mode 仅支持空（跟随包）/zh/en")
+    cfg = appstate.load_config()
+    d = _proj(cfg, body.project)
+    wbdir = d / "style"
+    wbdir.mkdir(parents=True, exist_ok=True)
+    wb = wbdir / "workbench.json"
+    wj = {}
+    if wb.is_file():
+        try:
+            wj = json.loads(wb.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            wj = {}
+    wj["lang_mode"] = body.lang_mode or None
+    wb.write_text(json.dumps(wj, ensure_ascii=False, indent=2) + "\n",
+                  encoding="utf-8", newline="\n")
+    return {"ok": True, "lang_mode": body.lang_mode or ""}
 
 
 @router.post("/default_pack")

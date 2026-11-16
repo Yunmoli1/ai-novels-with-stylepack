@@ -806,6 +806,19 @@ class TestWebServer(unittest.TestCase):
             r5 = self.client.post("/app/api/serial/default_pack",
                                   json={"project": "测试项目", "pack": ""})
             self.assertEqual(r5.json()["default_pack"], None)
+            # v0.13.19 项目语言模式：锁定/清除 + 非法值 400
+            lm = self.client.post("/app/api/serial/lang_mode",
+                                  json={"project": "测试项目", "lang_mode": "en"})
+            self.assertEqual(lm.status_code, 200)
+            r6 = self.client.get("/app/api/serial/project_packs",
+                                 params={"project": "测试项目"}).json()
+            self.assertEqual(r6["lang_mode"], "en")
+            bad = self.client.post("/app/api/serial/lang_mode",
+                                   json={"project": "测试项目", "lang_mode": "fr"})
+            self.assertEqual(bad.status_code, 400)
+            clr = self.client.post("/app/api/serial/lang_mode",
+                                   json={"project": "测试项目", "lang_mode": ""})
+            self.assertEqual(clr.json()["lang_mode"], "")
             # ---- v0.13.13 参考池 ----
             # 存项目池（cap 3 + 未知包拒收）→ project_packs 回读
             rp = self.client.post("/app/api/serial/ref_packs",
