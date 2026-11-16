@@ -149,6 +149,13 @@ def assemble(project_dir: Path, pack_dir: Path, chapter_no: int,
              keywords: list[str] | None = None,
              budget_tokens: int = 24000,
              ref_pack_dirs: list[Path] | None = None) -> dict:
+    # 包语言（v0.13.18）：预算估算按语言取系数（英文 0.29 tok/字符，
+    # 中文 0.75——旧口径会把英文装配高估 ~2.2 倍，参考池/前情过早被裁）
+    try:
+        meta = json.loads((pack_dir / "pack.json").read_text(encoding="utf-8"))
+        pack_lang = str(meta.get("language") or "zh")
+    except (OSError, ValueError):
+        pack_lang = "zh"
     keywords = keywords or []
     items: list[dict] = []  # 内部项：kind/source/text
     if ref_pack_dirs:
@@ -284,7 +291,7 @@ def assemble(project_dir: Path, pack_dir: Path, chapter_no: int,
     # 预算裁剪：只裁 trimmable；v0.9.2 按 prio 从高到低裁
     # （先裁"关联"，再"命中"，常驻最后——重要记忆活到最后）
     def tok(x: dict) -> int:
-        return _est_tokens(x["text"])
+        return splib.est_tokens(x["text"], pack_lang)
 
     total = sum(tok(i) for i in items)
     trimmables = sorted([i for i in items if i.get("trimmable")],

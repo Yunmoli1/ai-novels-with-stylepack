@@ -29,6 +29,18 @@ EN_B = (
 ZH_A = "他走进屋里，看见桌上摆着一封信。他拿起信，拆开看了起来。窗外一直在下雨。"
 
 
+class TestEstTokensLangAware(unittest.TestCase):
+    def test_en_vs_zh_same_char_length(self):
+        """v0.13.18 装配预算估算按语言取系数：英文 ≈0.29 tok/字符
+        （中文 0.75）——否则英文装配被高估 ~2.2 倍、参考池/前情过早被裁。"""
+        en = splib.est_tokens("a" * 3400, "en")    # ≈1000
+        zh = splib.est_tokens("好" * 3400, "zh")   # 2550
+        self.assertLess(en, zh // 2)
+        self.assertAlmostEqual(en, 1000, delta=80)
+        self.assertEqual(splib.est_tokens("x", "en"), 1)
+        self.assertEqual(splib.est_tokens("", "zh"), 0)
+
+
 class TestDetectLang(unittest.TestCase):
     def test_zh_en_and_mixed(self):
         self.assertEqual(splib.detect_lang(ZH_A), "zh")

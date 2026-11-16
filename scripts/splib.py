@@ -252,6 +252,15 @@ def split_sentences_en(text: str) -> list[str]:
     return out
 
 
+def est_tokens(text: str, lang: str = "zh") -> int:
+    """语言感知 token 粗估（v0.13.18）：中文 1 字≈0.75 token（与 assemble
+    同口径）；英文 ≈4.5 字符/词 × 1.3 token/词 → 每 3.4 字符≈1 token。
+    系数取偏保守（轻微高估）——预算裁剪宁可早裁。"""
+    if normalize_lang(lang).startswith(LANG_EN):
+        return max(1, int(len(text) / 3.4))
+    return int(len(text) * 0.75)
+
+
 def words_of(text: str) -> list[str]:
     """英文词序列（含撇号/右单引号内的缩写，如 don't / don’t）。"""
     return _WORD_RE.findall(text)

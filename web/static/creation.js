@@ -81,9 +81,11 @@ function applyLang() {
   S.lang = lang;
   const en = lang === 'en';
   const u = en ? 'words' : '字';
-  if ($('lang_badge')) {
-    $('lang_badge').textContent = en ? '🌐 English pack（长度按 words 计）'
-                                     : '🌐 中文包（长度按字计）';
+  for (const bid of ['lang_badge', 'lang_badge_serial']) {
+    if ($(bid)) {
+      $(bid).textContent = en ? '🌐 English pack（长度按 words 计）'
+                              : '🌐 中文包（长度按字计）';
+    }
   }
   if ($('lbl_tier')) $('lbl_tier').textContent = en ? 'Length tier' : '字数挡位';
   if ($('char_tier')) {
